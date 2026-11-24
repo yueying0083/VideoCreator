@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.config import DATA_DIR, load_settings
+from app.config import DATA_DIR, STATIC_WEB_DIR, load_settings
 from app.database import init_db
 from app.routers import assets, audio, chat, export, novel, projects, settings, shots, tasks
 from app.services.task_runner import mark_stale_jobs_on_startup
@@ -21,8 +22,8 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="Video Creator Studio API",
-    version="0.1.0",
-    description="Local-First Personal AI Video Creation Studio powered by Google AI Stack",
+    version="0.2.0",
+    description="Local-First & Docker-Ready Personal AI Video Creation Studio powered by Google AI Stack",
     lifespan=lifespan,
 )
 
@@ -57,3 +58,19 @@ def health():
         "has_gemini_key": cfg.has_gemini_key,
         "has_vertex_config": cfg.has_vertex_config,
     }
+
+
+# Unified single-container SPA serving (Docker / production build)
+if STATIC_WEB_DIR.exists() and (STATIC_WEB_DIR / "index.html").exists():
+    assets_dir = STATIC_WEB_DIR / "assets"
+    if assets_dir.exists():
+        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="web-assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def serve_spa(full_path: str):
+        if full_path.startswith("api/") or full_path == "api" or full_path.startswith("media/"):
+            raise HTTPException(status_code=404, detail="Not Found")
+        candidate = (STATIC_WEB_DIR / full_path).resolve()
+        if full_path and STATIC_WEB_DIR in candidate.parents and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(STATIC_WEB_DIR / "index.html")

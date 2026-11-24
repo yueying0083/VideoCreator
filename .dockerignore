@@ -1,0 +1,35 @@
+# Version control & IDE
+.git
+.gitignore
+.vscode
+.idea
+
+# Secrets & local runtime data (mounted via volume at runtime, never baked into image!)
+.env
+.env.*
+!.env.example
+data/
+credentials/
+*.db
+*.sqlite3
+*.sqlite3-*
+*.key
+*service-account*.json
+
+# Python local env & caches
+apps/api/.venv/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+apps/api/tests/
+
+# Node local deps & build outputs (rebuilt cleanly in Docker builder stage)
+apps/web/node_modules/
+apps/web/dist/
+apps/web/.vite/
+**/*.tsbuildinfo
+
+# Docs & Windows scripts
+docs/
+start.ps1
+*.log

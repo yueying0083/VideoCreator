@@ -1,0 +1,33 @@
+services:
+  video-creator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: video-creator-studio:latest
+    container_name: video-creator-studio
+    restart: unless-stopped
+    ports:
+      # 默认通过 http://localhost:3000 访问（也可在 .env 中设置 STUDIO_PORT 改端口）
+      - "${STUDIO_PORT:-3000}:8000"
+    env_file:
+      - .env
+    environment:
+      STUDIO_DATA_DIR: /data
+      STUDIO_ENV_PATH: /data/runtime.env
+      STUDIO_WEB_DIR: /app/web_dist
+      TZ: Asia/Shanghai
+      # 如果需要通过代理访问 Google API（例如国内 NAS/服务器环境），取消下方注释并改为你的代理地址：
+      # HTTP_PROXY: http://host.docker.internal:7890
+      # HTTPS_PROXY: http://host.docker.internal:7890
+      # NO_PROXY: localhost,127.0.0.1
+    volumes:
+      # 持久化数据库、小说、定妆图、分镜、成片与网页端保存的 runtime.env
+      - ./data:/data
+      # 可选：如使用 Vertex AI Veo 3.1 服务账号 JSON，取消下方注释，
+      # 并将 .env 中的 GOOGLE_APPLICATION_CREDENTIALS 设为 /credentials/service-account.json
+      # - ./credentials:/credentials:ro
+    extra_hosts:
+      # 方便 Linux / Windows 容器内访问宿主机代理（host.docker.internal）
+      - "host.docker.internal:host-gateway"
+    # 给 FFmpeg 1080p 渲染预留充足共享内存
+    shm_size: "1gb"

@@ -9,18 +9,47 @@
   - **3. 多轨时间线与导出**：按分集或全片组装、Lyria 3 配乐、SRT 字幕、本地 FFmpeg 一键合片导出
 - **零云端服务器费用**：全部数据与视频保存在本地 `data/` 目录，顶部实时追踪本月 API 预估消耗与 Ultra 额度余额。
 
-## 快速启动（Windows）
+---
 
-1. **配置环境变量**：
-   打开根目录的 `.env` 文件，填入 `GEMINI_API_KEY`（及可选的 `VERTEX_PROJECT_ID`）。
-   > 未填密钥也可直接启动！系统在 `APP_MODE=auto` 下自动启用 **Demo 模式**（本地生成真实测试图片/视频并完整跑通 FFmpeg 合片），填入密钥后即自动切换为 **Live 模式**（也可在网页右上角「设置」中随时配置）。
+## 方式一：Docker 一键部署（推荐 · 单容器前后端合一）
 
-2. **一键启动前后端**：
+镜像采用多阶段构建（`Node 20` 编译前端 + `Python 3.11-slim` + 原生 `FFmpeg` + 文泉驿中文字体确保硬字幕不乱码），单容器对外提供完整服务，数据持久化挂载在宿主机 `./data`。
+
+1. **准备配置**：
+   ```bash
+   cp .env.example .env
+   # 编辑 .env 填入 GEMINI_API_KEY（不填也会自动以 Demo 模式启动，后续可在网页右上角「设置」中随时配置）
+   ```
+2. **构建并后台启动**：
+   ```bash
+   docker compose up -d --build
+   ```
+3. **打开工作台**：
+   - 浏览器访问 `http://localhost:3000`（端口可在 `.env` 中通过 `STUDIO_PORT` 修改）
+   - 健康检查：`http://localhost:3000/api/health`
+   - 查看日志：`docker compose logs -f`
+
+### Docker 进阶配置说明
+- **网页端「设置」持久化**：你在网页右上角保存的 API Key / 模型 / 预算会写入持久化卷 `./data/runtime.env`，重建容器不会丢失。
+- **接入 Vertex AI（Veo 3.1 正式版）**：
+  1. 在项目根目录新建 `credentials/` 文件夹，放入你的 GCP 服务账号 JSON 文件（如 `service-account.json`）。
+  2. 取消 `docker-compose.yml` 中 `- ./credentials:/credentials:ro` 的注释。
+  3. 在 `.env` 中配置 `VERTEX_PROJECT_ID=你的项目ID` 与 `GOOGLE_APPLICATION_CREDENTIALS=/credentials/service-account.json`。
+- **网络代理（国内 NAS / 服务器）**：如容器访问 Google API 需要代理，取消 `docker-compose.yml` 中 `HTTP_PROXY` / `HTTPS_PROXY` 注释并指向你的代理地址即可。
+
+---
+
+## 方式二：Windows 本地开发启动
+
+1. 编辑根目录 `.env`（可选，未填自动进入 Demo 模式）。
+2. 运行一键脚本：
    ```powershell
    .\start.ps1
    ```
    - 前端工作台：`http://localhost:3000`
    - 后端 API 文档：`http://127.0.0.1:8000/docs`
+
+---
 
 ## 领取 Google AI Ultra 开发者额度提示
 1. 前往 [Google AI Studio](https://aistudio.google.com/) / Google Developer Program 后台领取每月 $40（Ultra 5x）或 $100（Ultra 20x）的云端开发者抵扣金并绑定结算账号。

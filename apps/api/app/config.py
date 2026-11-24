@@ -6,10 +6,23 @@ from typing import Literal
 from dotenv import dotenv_values, load_dotenv, set_key
 from pydantic import BaseModel
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-ENV_PATH = REPO_ROOT / ".env"
-DATA_DIR = REPO_ROOT / "data"
+
+def _resolve_repo_root() -> Path:
+    here = Path(__file__).resolve()
+    # Local monorepo layout: <repo>/apps/api/app/config.py
+    if len(here.parents) >= 4 and (here.parents[3] / "apps").exists():
+        return here.parents[3]
+    # Docker container layout: /app/app/config.py
+    return here.parents[1]
+
+
+REPO_ROOT = _resolve_repo_root()
+DATA_DIR = Path(os.environ.get("STUDIO_DATA_DIR", str(REPO_ROOT / "data"))).resolve()
 DB_PATH = DATA_DIR / "studio.db"
+ENV_PATH = Path(os.environ.get("STUDIO_ENV_PATH", str(REPO_ROOT / ".env"))).resolve()
+STATIC_WEB_DIR = Path(
+    os.environ.get("STUDIO_WEB_DIR", str(REPO_ROOT / "apps" / "web" / "dist"))
+).resolve()
 
 if ENV_PATH.exists():
     load_dotenv(ENV_PATH, override=False)
@@ -17,16 +30,16 @@ if ENV_PATH.exists():
 
 # Estimated USD unit costs (2026 Google AI pricing references)
 COST_RATES = {
-    "chat": 0.005,              # per director agent turn (Gemini Flash/Pro)
-    "qa": 0.01,                 # per video QA review
-    "image": 0.055,             # per Nano Banana 2 (1K-2K) generation
-    "turnaround": 0.067,        # per 3-view character turnaround sheet
-    "veo_lite_per_sec": 0.05,   # Veo 3.1 Lite
-    "veo_fast_per_sec": 0.12,   # Veo 3.1 Fast
+    "chat": 0.005,                 # per director agent turn (Gemini Flash/Pro)
+    "qa": 0.01,                    # per video QA review
+    "image": 0.055,                # per Nano Banana 2 (1K-2K) generation
+    "turnaround": 0.067,           # per 3-view character turnaround sheet
+    "veo_lite_per_sec": 0.05,      # Veo 3.1 Lite
+    "veo_fast_per_sec": 0.12,      # Veo 3.1 Fast
     "veo_standard_per_sec": 0.40,  # Veo 3.1 Standard
-    "omni_flash_per_sec": 0.03, # Gemini Omni 1.2 Flash estimated video cost/sec
-    "music_clip": 0.04,         # Lyria 3 30s clip
-    "music_pro": 0.08,          # Lyria 3 Pro full song
+    "omni_flash_per_sec": 0.03,    # Gemini Omni 1.2 Flash estimated video cost/sec
+    "music_clip": 0.04,            # Lyria 3 30s clip
+    "music_pro": 0.08,             # Lyria 3 Pro full song
 }
 
 
@@ -95,10 +108,15 @@ def load_settings() -> RuntimeSettings:
     file_vals = dotenv_values(ENV_PATH) if ENV_PATH.exists() else {}
 
     def _get(env_name: str, default: str) -> str:
-        val = file_vals.get(env_name)
-        if val is not None:
-            return str(val)
-        return os.environ.get(env_name, default)
+        # Prefer non-empty value from runtime env file (supports live edits & Docker UI persistence),
+        # then fall back to container/process environment variables (docker-compose env_file / environment).
+        file_val = file_vals.get(env_name)
+        if file_val is not None and str(file_val).strip() != "":
+            return str(file_val)
+        env_val = os.environ.get(env_name)
+        if env_val is not None and str(env_val).strip() != "":
+            return str(env_val)
+        return default
 
     app_mode = _get("APP_MODE", "auto").strip().lower()
     if os.environ.get("STUDIO_FORCE_DEMO") == "1":
@@ -133,8 +151,9 @@ def load_settings() -> RuntimeSettings:
 
 
 def save_settings_updates(updates: dict) -> RuntimeSettings:
+    ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
     if not ENV_PATH.exists():
-        ENV_PATH.write_text("# Video Creator Studio local config\n", encoding="utf-8")
+        ENV_PATH.write_text("# Video Creator Studio runtime config\n", encoding="utf-8")
 
     for field_name, value in updates.items():
         if value is None or field_name not in ENV_KEY_MAP:

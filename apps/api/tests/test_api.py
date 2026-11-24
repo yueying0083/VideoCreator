@@ -24,9 +24,12 @@ def _wait_task(client: TestClient, task_id: str, timeout: float = 30.0) -> dict:
 
 def test_full_demo_studio_workflow():
     with TestClient(app) as client:
-        # 1. Health & Settings
+        # 1. Health, SPA serving & Settings
         health = client.get("/api/health").json()
         assert health["status"] == "ok"
+        spa = client.get("/")
+        assert spa.status_code == 200
+        assert "<!doctype html>" in spa.text.lower()
         settings = client.get("/api/settings").json()
         assert settings["ffmpeg_available"] is True
 

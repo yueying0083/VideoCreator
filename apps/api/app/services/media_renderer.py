@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -242,8 +243,9 @@ def render_timeline_export(
                 tf.write(subtitle_srt.strip() + "\n")
                 temp_srt_file = Path(tf.name)
             escaped = _escape_ffmpeg_sub_path(temp_srt_file)
+            font_part = "" if os.name == "nt" else "FontName=WenQuanYi Zen Hei,"
             filter_parts.append(
-                f"{video_label}subtitles='{escaped}':force_style='FontSize=20,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,Outline=2,MarginV=28'[vsub]"
+                f"{video_label}subtitles='{escaped}':force_style='{font_part}FontSize=20,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,Outline=2,MarginV=28'[vsub]"
             )
             video_label = "[vsub]"
 

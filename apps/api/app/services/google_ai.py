@@ -41,6 +41,12 @@ def _get_vertex_client(settings: RuntimeSettings):
 
 def _load_pil_font(size: int):
     candidates = [
+        # Linux / Docker CJK & fallback fonts
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        # Windows fonts
         "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/simhei.ttf",
         "C:/Windows/Fonts/arial.ttf",

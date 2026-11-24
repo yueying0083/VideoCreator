@@ -6,8 +6,11 @@
 
 # Local data & generated media
 data/
+credentials/
 *.db
+*.db-*
 *.sqlite3
+*.sqlite3-*
 
 # Python
 .venv/
