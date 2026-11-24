@@ -1,0 +1,59 @@
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+from app.config import DATA_DIR, load_settings
+from app.database import init_db
+from app.routers import assets, audio, chat, export, novel, projects, settings, shots, tasks
+from app.services.task_runner import mark_stale_jobs_on_startup
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    init_db()
+    mark_stale_jobs_on_startup()
+    yield
+
+
+app = FastAPI(
+    title="Video Creator Studio API",
+    version="0.1.0",
+    description="Local-First Personal AI Video Creation Studio powered by Google AI Stack",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/media", StaticFiles(directory=str(DATA_DIR)), name="media")
+
+app.include_router(settings.router)
+app.include_router(projects.router)
+app.include_router(novel.router)
+app.include_router(assets.router)
+app.include_router(shots.router)
+app.include_router(chat.router)
+app.include_router(audio.router)
+app.include_router(tasks.router)
+app.include_router(export.router)
+
+
+@app.get("/api/health")
+def health():
+    cfg = load_settings()
+    return {
+        "status": "ok",
+        "effective_mode": cfg.effective_mode,
+        "has_gemini_key": cfg.has_gemini_key,
+        "has_vertex_config": cfg.has_vertex_config,
+    }

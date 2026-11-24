@@ -1,0 +1,29 @@
+# Environments & secrets
+.env
+.env.local
+*.key
+*service-account*.json
+
+# Local data & generated media
+data/
+*.db
+*.sqlite3
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Node / Web
+node_modules/
+apps/web/dist/
+apps/web/.vite/
+*.tsbuildinfo
+*.log
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

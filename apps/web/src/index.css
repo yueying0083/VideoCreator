@@ -1,0 +1,30 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #2c3448 #0b0d12;
+  }
+}
+
+.studio-input {
+  @apply w-full rounded-lg border border-studio-border bg-studio-bg px-3 py-2 text-sm text-slate-100 placeholder-slate-500 focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500;
+}
+
+.studio-btn {
+  @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50;
+}
+
+.studio-btn-primary {
+  @apply studio-btn bg-indigo-600 text-white hover:bg-indigo-500;
+}
+
+.studio-btn-secondary {
+  @apply studio-btn border border-studio-border bg-studio-card text-slate-200 hover:border-slate-500 hover:bg-slate-800;
+}
+
+.studio-btn-ghost {
+  @apply studio-btn text-slate-400 hover:bg-slate-800 hover:text-slate-100;
+}
