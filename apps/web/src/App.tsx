@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, BookOpen, Film, Layers, Scissors, Sparkles } from "lucide-react";
-import { api } from "./api";
+import { AlertCircle, BookOpen, Film, Layers, Loader2, Scissors, Sparkles } from "lucide-react";
+import { api, setUnauthorizedHandler } from "./api";
+import { AccountModal } from "./components/AccountModal";
 import { AssetHub } from "./components/AssetHub";
+import { AuthScreen } from "./components/AuthScreen";
 import { DirectorChat } from "./components/DirectorChat";
 import { NovelTab } from "./components/NovelTab";
 import { SettingsModal } from "./components/SettingsModal";
@@ -11,6 +13,7 @@ import { TimelineTab } from "./components/TimelineTab";
 import { TopBar } from "./components/TopBar";
 import type {
   Asset,
+  AuthStatus,
   BudgetSummary,
   ChatMessage,
   Episode,
@@ -26,6 +29,10 @@ import type {
 type ActiveTab = "novel" | "assets" | "storyboard" | "timeline" | "studio";
 
 export default function App() {
+  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [accountOpen, setAccountOpen] = useState(false);
+
   const [settings, setSettings] = useState<Settings | null>(null);
   const [budget, setBudget] = useState<BudgetSummary | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -102,12 +109,58 @@ export default function App() {
     return shots.filter((s) => s.episode_id === selectedEpisodeFilter);
   }, [shots, selectedEpisodeFilter]);
 
+  const isAuthorized = Boolean(
+    authStatus && (!authStatus.auth_enabled || authStatus.authenticated)
+  );
+
+  const refreshAuth = useCallback(async () => {
+    try {
+      const s = await api.getAuthStatus();
+      setAuthStatus(s);
+    } catch (err) {
+      showToast(`检查登录状态失败：${(err as Error).message}`, "error");
+    } finally {
+      setAuthLoading(false);
+    }
+  }, [showToast]);
+
+  const handleLogout = useCallback(async () => {
+    try {
+      await api.logout();
+    } catch {
+      // ignore network error during logout
+    }
+    setCurrentProjectId(null);
+    setProjects([]);
+    setAssets([]);
+    setEpisodes([]);
+    setShots([]);
+    setMessages([]);
+    setTasks([]);
+    setExportsList([]);
+    setStudioJobs([]);
+    setSettings(null);
+    setBudget(null);
+    setAccountOpen(false);
+    setSettingsOpen(false);
+    await refreshAuth();
+  }, [refreshAuth]);
+
   useEffect(() => {
+    setUnauthorizedHandler(() => {
+      setAuthStatus((prev) => (prev ? { ...prev, authenticated: false } : prev));
+    });
+    refreshAuth();
+    return () => setUnauthorizedHandler(null);
+  }, [refreshAuth]);
+
+  useEffect(() => {
+    if (!isAuthorized) return;
     (async () => {
       try {
         const ps = await refreshGlobal();
         if (ps.length > 0) {
-          setCurrentProjectId(ps[0].id);
+          setCurrentProjectId((prev) => prev || ps[0].id);
         } else {
           const starter = await api.createProject({
             name: "我的第一条 AI 短片",
@@ -121,17 +174,17 @@ export default function App() {
         showToast(`初始化失败：${(err as Error).message}`, "error");
       }
     })();
-  }, [refreshGlobal, showToast]);
+  }, [isAuthorized, refreshGlobal, showToast]);
 
   useEffect(() => {
-    if (currentProjectId) {
+    if (isAuthorized && currentProjectId) {
       refreshProjectData(currentProjectId).catch((err) => showToast((err as Error).message, "error"));
     }
-  }, [currentProjectId, refreshProjectData, showToast]);
+  }, [isAuthorized, currentProjectId, refreshProjectData, showToast]);
 
   // Live SSE stream for instant Task & StudioJob updates
   useEffect(() => {
-    if (!currentProjectId) return;
+    if (!isAuthorized || !currentProjectId) return;
     const es = new EventSource("/api/tasks/events");
     es.onmessage = (evt) => {
       try {
@@ -209,6 +262,26 @@ export default function App() {
     setActiveTab("studio");
   }, []);
 
+  if (authLoading || !authStatus) {
+    return (
+      <div className="flex min-h-screen items-center justify-center gap-2 bg-studio-bg text-sm text-slate-400">
+        <Loader2 className="h-4 w-4 animate-spin text-indigo-400" />
+        <span>正在检查登录状态...</span>
+      </div>
+    );
+  }
+
+  if (!isAuthorized) {
+    return (
+      <AuthScreen
+        status={authStatus}
+        onAuthenticated={(next) => {
+          setAuthStatus(next);
+        }}
+      />
+    );
+  }
+
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-studio-bg text-slate-100">
       <TopBar
@@ -217,6 +290,8 @@ export default function App() {
         settings={settings}
         budget={budget}
         activeJobs={activeJobs}
+        authEnabled={authStatus.auth_enabled}
+        authUsername={authStatus.username}
         onSelectProject={(id) => setCurrentProjectId(id)}
         onCreateProject={(name, aspect_ratio) =>
           wrap(async () => {
@@ -235,6 +310,8 @@ export default function App() {
           })
         }
         onOpenSettings={() => setSettingsOpen(true)}
+        onOpenAccount={() => setAccountOpen(true)}
+        onLogout={handleLogout}
       />
 
       {toast && (
@@ -687,6 +764,13 @@ export default function App() {
             showToast(`配置已保存至 .env（当前模式: ${updated.effective_mode.toUpperCase()}）`);
           })
         }
+      />
+
+      <AccountModal
+        open={accountOpen}
+        username={authStatus.username || "admin"}
+        onClose={() => setAccountOpen(false)}
+        onSuccess={(msg) => showToast(msg)}
       />
     </div>
   );

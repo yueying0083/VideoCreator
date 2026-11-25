@@ -1,5 +1,6 @@
 import type {
   Asset,
+  AuthStatus,
   BudgetSummary,
   ChatMessage,
   ConnectionTestResult,
@@ -16,12 +17,22 @@ import type {
   VideoResolution,
 } from "./types";
 
+let unauthorizedHandler: (() => void) | null = null;
+
+export function setUnauthorizedHandler(cb: (() => void) | null): void {
+  unauthorizedHandler = cb;
+}
+
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, {
+    credentials: "same-origin",
     headers: init?.body instanceof FormData ? undefined : { "Content-Type": "application/json" },
     ...init,
   });
   if (!res.ok) {
+    if (res.status === 401 && !url.startsWith("/api/auth/") && unauthorizedHandler) {
+      unauthorizedHandler();
+    }
     let msg = `HTTP ${res.status}`;
     try {
       const body = await res.json();
@@ -47,6 +58,25 @@ export function formatDuration(sec?: number | null): string {
 }
 
 export const api = {
+  // Authentication
+  getAuthStatus: () => req<AuthStatus>("/api/auth/status"),
+  setupAdmin: (username: string, password: string) =>
+    req<AuthStatus>("/api/auth/setup", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    }),
+  login: (username: string, password: string, remember = true) =>
+    req<AuthStatus>("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password, remember }),
+    }),
+  logout: () => req<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
+  changePassword: (current_password: string, new_password: string) =>
+    req<{ ok: boolean }>("/api/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({ current_password, new_password }),
+    }),
+
   // Settings & Budget
   getSettings: () => req<Settings>("/api/settings"),
   updateSettings: (payload: Partial<Settings> & { gemini_api_key?: string }) =>

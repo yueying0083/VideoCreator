@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 
 # Force demo mode during automated tests so zero cloud cost is incurred even after user fills .env
 os.environ["STUDIO_FORCE_DEMO"] = "1"
+# Keep existing end-to-end studio suites auth-free; dedicated auth suite enables AUTH_ENABLED=true
+os.environ["AUTH_ENABLED"] = "false"
 
 from app.config import RuntimeSettings  # noqa: E402
 from app.main import app  # noqa: E402
@@ -784,4 +786,158 @@ def test_mocked_live_interactions_api(tmp_path: Path, monkeypatch: pytest.Monkey
 
     qa_res, qa_model, _ = review_video_qa(out_vid, "镜头1", "雨夜", "Neon alley", settings=live_cfg)
     assert qa_model == "gemini-4-hydrogen" and qa_res["score"] == 9
+
+
+def test_auth_system_and_media_protection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify single-admin setup, HttpOnly session gating, rate limit, password rotation, and /media isolation."""
+    from app.database import SessionLocal, User, UserSession, init_db
+    from app.services.auth import COOKIE_NAME, reset_rate_limiter
+
+    monkeypatch.setenv("AUTH_ENABLED", "true")
+    reset_rate_limiter()
+    init_db()
+
+    # Ensure clean user state before test
+    db = SessionLocal()
+    try:
+        db.query(UserSession).delete()
+        db.query(User).delete()
+        db.commit()
+    finally:
+        db.close()
+
+    img_file = _make_sample_image(tmp_path / "auth_asset.png")
+    created_pid: str | None = None
+
+    try:
+        with TestClient(app) as client:
+            # 1. Public health & initial auth status
+            h = client.get("/api/health")
+            assert h.status_code == 200
+            assert h.json()["auth_enabled"] is True
+
+            st = client.get("/api/auth/status")
+            assert st.status_code == 200
+            assert st.json()["auth_enabled"] is True
+            assert st.json()["initialized"] is False
+            assert st.json()["authenticated"] is False
+
+            # 2. All protected endpoints & media/docs paths must reject unauthenticated callers with 401
+            for protected_path in (
+                "/api/projects",
+                "/api/settings",
+                "/api/tasks/events",
+                "/media/projects/nonexistent/file.png",
+                "/media/runtime.env",
+                "/media/studio.db",
+                "/docs",
+            ):
+                resp = client.get(protected_path)
+                assert resp.status_code == 401, f"Expected 401 for {protected_path}, got {resp.status_code}"
+
+            # 3. First-time admin setup succeeds and sets HttpOnly cookie; second setup is 403
+            setup_res = client.post(
+                "/api/auth/setup",
+                json={"username": "OwnerAdmin", "password": "StrongPass123!"},
+            )
+            assert setup_res.status_code == 200, setup_res.text
+            assert setup_res.json()["authenticated"] is True
+            assert setup_res.json()["username"] == "owneradmin"
+            assert COOKIE_NAME in setup_res.cookies
+            first_cookie = setup_res.cookies[COOKIE_NAME]
+
+            dup_res = client.post(
+                "/api/auth/setup",
+                json={"username": "attacker", "password": "Password123!"},
+            )
+            assert dup_res.status_code == 403
+
+            # 4. Authenticated API & project media work; /media/runtime.env & /media/studio.db are 404
+            assert client.get("/api/projects").status_code == 200
+            assert client.get("/api/settings").status_code == 200
+
+            proj = client.post("/api/projects", json={"name": "鉴权媒体测试", "aspect_ratio": "16:9"}).json()
+            created_pid = proj["id"]
+            with open(img_file, "rb") as f:
+                up = client.post(
+                    f"/api/projects/{created_pid}/assets/upload-media",
+                    files={"file": ("auth_asset.png", f, "image/png")},
+                )
+            assert up.status_code == 200
+            media_url = up.json()["file_url"]
+            assert media_url.startswith("/media/projects/")
+            assert client.get(media_url).status_code == 200
+
+            assert client.get("/media/runtime.env").status_code == 404
+            assert client.get("/media/studio.db").status_code == 404
+
+            # Unauthenticated second client cannot read uploaded project media
+            with TestClient(app) as anon_client:
+                assert anon_client.get(media_url).status_code == 401
+
+            # 5. Password change validates current password and revokes older session tokens
+            bad_chg = client.post(
+                "/api/auth/change-password",
+                json={"current_password": "WrongPassword", "new_password": "NewStrongPass456!"},
+            )
+            assert bad_chg.status_code == 400
+
+            ok_chg = client.post(
+                "/api/auth/change-password",
+                json={"current_password": "StrongPass123!", "new_password": "NewStrongPass456!"},
+            )
+            assert ok_chg.status_code == 200
+            assert client.get("/api/projects").status_code == 200
+
+            # Old session token from before password rotation must be rejected
+            with TestClient(app) as old_client:
+                old_client.cookies.set(COOKIE_NAME, first_cookie)
+                assert old_client.get("/api/projects").status_code == 401
+
+            # 6. Logout revokes active session
+            out = client.post("/api/auth/logout")
+            assert out.status_code == 200
+            assert client.get("/api/projects").status_code == 401
+
+            # 7. Rate limit on failed logins, then clean login with rotated password
+            for _ in range(10):
+                bad_login = client.post(
+                    "/api/auth/login",
+                    json={"username": "owneradmin", "password": "BadPassword"},
+                )
+                assert bad_login.status_code == 401
+
+            limited = client.post(
+                "/api/auth/login",
+                json={"username": "owneradmin", "password": "BadPassword"},
+            )
+            assert limited.status_code == 429
+
+            reset_rate_limiter()
+            ok_login = client.post(
+                "/api/auth/login",
+                json={"username": "OwnerAdmin", "password": "NewStrongPass456!", "remember": True},
+            )
+            assert ok_login.status_code == 200
+            assert ok_login.json()["authenticated"] is True
+            assert client.get("/api/projects").status_code == 200
+    finally:
+        if created_pid:
+            from app.services.storage import delete_project_files
+
+            delete_project_files(created_pid)
+        db = SessionLocal()
+        try:
+            if created_pid:
+                from app.database import Project
+
+                prow = db.get(Project, created_pid)
+                if prow:
+                    db.delete(prow)
+            db.query(UserSession).delete()
+            db.query(User).delete()
+            db.commit()
+        finally:
+            db.close()
+        reset_rate_limiter()
 

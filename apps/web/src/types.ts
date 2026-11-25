@@ -284,3 +284,11 @@ export function estimateVideoUsd(engine: VideoEngine, sec: number, resolution: V
   const mult = engine === "omni_flash" && resolution === "4k" ? 1.5 : 1.0;
   return ((opt?.ratePerSec ?? 0.05) * sec * mult).toFixed(2);
 }
+
+export interface AuthStatus {
+  auth_enabled: boolean;
+  initialized: boolean;
+  authenticated: boolean;
+  username?: string | null;
+  role?: string | null;
+}

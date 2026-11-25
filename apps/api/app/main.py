@@ -1,22 +1,25 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 import asyncio
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.config import DATA_DIR, STATIC_WEB_DIR, load_settings
+from app.config import DATA_DIR, STATIC_WEB_DIR, get_cors_origins, is_auth_enabled
 from app.database import init_db
-from app.routers import assets, audio, chat, export, novel, projects, settings, shots, studio, tasks
+from app.routers import assets, audio, auth, chat, export, novel, projects, settings, shots, studio, tasks
+from app.services.auth import AuthGateMiddleware, ensure_env_admin_if_configured
 from app.services.task_runner import attach_event_loop, mark_stale_jobs_on_startup
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    (DATA_DIR / "projects").mkdir(parents=True, exist_ok=True)
     init_db()
+    ensure_env_admin_if_configured()
     mark_stale_jobs_on_startup()
     attach_event_loop(asyncio.get_running_loop())
     yield
@@ -29,17 +32,23 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Register AuthGateMiddleware first so CORSMiddleware wraps it as outermost
+app.add_middleware(AuthGateMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "*"],
+    allow_origins=get_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-app.mount("/media", StaticFiles(directory=str(DATA_DIR)), name="media")
+MEDIA_PROJECTS_DIR = DATA_DIR / "projects"
+MEDIA_PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+# Expose ONLY generated/uploaded project media under /media/projects (never /data/runtime.env or studio.db)
+app.mount("/media/projects", StaticFiles(directory=str(MEDIA_PROJECTS_DIR)), name="media-projects")
 
+app.include_router(auth.router)
 app.include_router(settings.router)
 app.include_router(projects.router)
 app.include_router(novel.router)
@@ -54,12 +63,9 @@ app.include_router(studio.router)
 
 @app.get("/api/health")
 def health():
-    cfg = load_settings()
     return {
         "status": "ok",
-        "effective_mode": cfg.effective_mode,
-        "has_gemini_key": cfg.has_gemini_key,
-        "has_vertex_config": cfg.has_vertex_config,
+        "auth_enabled": is_auth_enabled(),
     }
 
 
@@ -71,7 +77,7 @@ if STATIC_WEB_DIR.exists() and (STATIC_WEB_DIR / "index.html").exists():
 
     @app.get("/{full_path:path}", include_in_schema=False)
     def serve_spa(full_path: str):
-        if full_path.startswith("api/") or full_path == "api" or full_path.startswith("media/"):
+        if full_path.startswith("api/") or full_path == "api" or full_path.startswith("media/") or full_path == "media":
             raise HTTPException(status_code=404, detail="Not Found")
         candidate = (STATIC_WEB_DIR / full_path).resolve()
         if full_path and STATIC_WEB_DIR in candidate.parents and candidate.is_file():

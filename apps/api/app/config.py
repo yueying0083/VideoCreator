@@ -204,3 +204,46 @@ def mask_secret(secret: str) -> str:
     if len(s) <= 8:
         return "••••"
     return f"••••{s[-4:]}"
+
+
+def _read_config_value(env_name: str, default: str = "") -> str:
+    """Read config giving process os.environ precedence over runtime env file when explicitly set."""
+    env_val = os.environ.get(env_name)
+    if env_val is not None and str(env_val).strip() != "":
+        return str(env_val).strip()
+    file_vals = dotenv_values(ENV_PATH) if ENV_PATH.exists() else {}
+    file_val = file_vals.get(env_name)
+    if file_val is not None and str(file_val).strip() != "":
+        return str(file_val).strip()
+    return default
+
+
+def is_auth_enabled() -> bool:
+    raw = _read_config_value("AUTH_ENABLED", "true").lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def get_session_ttl_days() -> int:
+    raw = _read_config_value("SESSION_TTL_DAYS", "14")
+    try:
+        return max(1, min(90, int(raw)))
+    except ValueError:
+        return 14
+
+
+def get_cors_origins() -> list[str]:
+    origins = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ]
+    extra = _read_config_value("CORS_ORIGINS", "")
+    if extra:
+        for item in extra.split(","):
+            cleaned = item.strip().rstrip("/")
+            if cleaned and cleaned != "*" and cleaned not in origins:
+                origins.append(cleaned)
+    return origins

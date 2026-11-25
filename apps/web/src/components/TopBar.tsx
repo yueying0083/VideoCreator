@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Clapperboard, FolderPlus, Loader2, Settings as SettingsIcon, Sparkles, Trash2 } from "lucide-react";
+import { Clapperboard, FolderPlus, KeyRound, Loader2, LogOut, Settings as SettingsIcon, Sparkles, Trash2 } from "lucide-react";
 import type { BudgetSummary, JobTask, Project, Settings } from "../types";
 
 interface TopBarProps {
@@ -8,10 +8,14 @@ interface TopBarProps {
   settings: Settings | null;
   budget: BudgetSummary | null;
   activeJobs: JobTask[];
+  authEnabled?: boolean;
+  authUsername?: string | null;
   onSelectProject: (id: string) => void;
   onCreateProject: (name: string, aspectRatio: "16:9" | "9:16" | "1:1") => Promise<void>;
   onDeleteProject: (id: string) => Promise<void>;
   onOpenSettings: () => void;
+  onOpenAccount?: () => void;
+  onLogout?: () => void;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
@@ -20,10 +24,14 @@ export const TopBar: React.FC<TopBarProps> = ({
   settings,
   budget,
   activeJobs,
+  authEnabled,
+  authUsername,
   onSelectProject,
   onCreateProject,
   onDeleteProject,
   onOpenSettings,
+  onOpenAccount,
+  onLogout,
 }) => {
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
@@ -160,6 +168,31 @@ export const TopBar: React.FC<TopBarProps> = ({
           <SettingsIcon className="h-3.5 w-3.5" />
           设置
         </button>
+
+        {authEnabled && authUsername && (
+          <div className="flex items-center gap-1.5 border-l border-studio-border pl-2.5">
+            {onOpenAccount && (
+              <button
+                className="studio-btn-ghost text-xs text-slate-300 hover:text-white"
+                onClick={onOpenAccount}
+                title="修改管理员密码"
+              >
+                <KeyRound className="h-3.5 w-3.5 text-indigo-400" />
+                <span>{authUsername}</span>
+              </button>
+            )}
+            {onLogout && (
+              <button
+                className="studio-btn-ghost text-xs text-slate-400 hover:text-rose-300"
+                onClick={onLogout}
+                title="退出登录"
+              >
+                <LogOut className="h-3.5 w-3.5" />
+                <span>退出</span>
+              </button>
+            )}
+          </div>
+        )}
       </div>
     </header>
   );

@@ -263,6 +263,37 @@ class StudioJob(Base):
     project: Mapped["Project"] = relationship(back_populates="studio_jobs")
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    username: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
+    role: Mapped[str] = mapped_column(String(32), default="admin")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    sessions: Mapped[list["UserSession"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+
+
+class UserSession(Base):
+    __tablename__ = "user_sessions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    user_agent: Mapped[str] = mapped_column(String(300), default="")
+    ip_address: Mapped[str] = mapped_column(String(64), default="")
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    user: Mapped["User"] = relationship(back_populates="sessions")
+
+
 def _add_column_if_missing(conn, insp, table: str, column: str, ddl: str) -> None:
     if table not in insp.get_table_names():
         return

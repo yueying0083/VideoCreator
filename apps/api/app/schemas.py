@@ -453,3 +453,27 @@ class JobTaskOut(BaseModel):
     estimated_cost_usd: float
     created_at: datetime
     updated_at: datetime
+
+
+class AuthStatusOut(BaseModel):
+    auth_enabled: bool
+    initialized: bool
+    authenticated: bool
+    username: str | None = None
+    role: str | None = None
+
+
+class AuthSetupRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=32)
+    password: str = Field(..., min_length=8, max_length=128)
+
+
+class AuthLoginRequest(BaseModel):
+    username: str = Field(..., min_length=1, max_length=64)
+    password: str = Field(..., min_length=1, max_length=128)
+    remember: bool = True
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., min_length=1, max_length=128)
+    new_password: str = Field(..., min_length=8, max_length=128)
