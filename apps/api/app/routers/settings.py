@@ -7,8 +7,15 @@ from sqlalchemy.orm import Session
 
 from app.config import load_settings, mask_secret, save_settings_updates
 from app.database import CostLog, get_db
-from app.schemas import BudgetSummary, SettingsOut, SettingsUpdate
-from app.services.media_renderer import get_ffmpeg_bin
+from app.schemas import (
+    BudgetSummary,
+    ConnectionTestRequest,
+    ConnectionTestResponse,
+    SettingsOut,
+    SettingsUpdate,
+)
+from app.services.genai_utils import test_gemini_connection
+from app.services.media_renderer import get_ffmpeg_bin, get_ffprobe_bin
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -16,6 +23,7 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 def _to_settings_out() -> SettingsOut:
     cfg = load_settings()
     ffmpeg = get_ffmpeg_bin()
+    ffprobe = get_ffprobe_bin()
     return SettingsOut(
         app_mode=cfg.app_mode,
         effective_mode=cfg.effective_mode,
@@ -32,8 +40,11 @@ def _to_settings_out() -> SettingsOut:
         veo_fast_model=cfg.veo_fast_model,
         veo_standard_model=cfg.veo_standard_model,
         music_model=cfg.music_model,
+        max_concurrent_jobs=cfg.max_concurrent_jobs,
+        video_request_timeout=cfg.video_request_timeout,
         monthly_budget_usd=cfg.monthly_budget_usd,
         ffmpeg_available=bool(ffmpeg),
+        ffprobe_available=bool(ffprobe),
         ffmpeg_path=ffmpeg or "",
     )
 
@@ -47,6 +58,16 @@ def get_settings():
 def update_settings(payload: SettingsUpdate):
     save_settings_updates(payload.model_dump(exclude_none=True))
     return _to_settings_out()
+
+
+@router.post("/test-connection", response_model=ConnectionTestResponse)
+def test_connection(payload: ConnectionTestRequest | None = None):
+    cfg = load_settings()
+    ok, message, checked_model = test_gemini_connection(
+        cfg,
+        api_key_override=payload.gemini_api_key if payload else None,
+    )
+    return ConnectionTestResponse(ok=ok, message=message, checked_model=checked_model)
 
 
 @router.get("/budget", response_model=BudgetSummary)

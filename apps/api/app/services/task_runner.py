@@ -2,9 +2,79 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Callable
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, AsyncIterator, Callable
 
-from app.database import CostLog, JobTask, SessionLocal, utcnow
+from app.config import load_settings
+from app.database import CostLog, JobTask, SessionLocal, StudioJob, utcnow
+from app.services.genai_utils import sanitize_error
+
+_cfg = load_settings()
+_worker_pool = ThreadPoolExecutor(max_workers=_cfg.max_concurrent_jobs, thread_name_prefix="vc-worker")
+_chain_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="vc-chain")
+
+_event_loop: asyncio.AbstractEventLoop | None = None
+_subscribers: set[asyncio.Queue[str]] = set()
+_sub_lock = threading.Lock()
+
+
+def attach_event_loop(loop: asyncio.AbstractEventLoop) -> None:
+    global _event_loop
+    _event_loop = loop
+
+
+def publish_event(event_type: str, data: dict[str, Any]) -> None:
+    payload = json.dumps({"type": event_type, "data": data}, ensure_ascii=False, default=str)
+    with _sub_lock:
+        subs = list(_subscribers)
+    if not subs or not _event_loop:
+        return
+    for q in subs:
+        try:
+            _event_loop.call_soon_threadsafe(q.put_nowait, payload)
+        except Exception:
+            pass
+
+
+async def subscribe_events() -> AsyncIterator[str]:
+    q: asyncio.Queue[str] = asyncio.Queue(maxsize=300)
+    with _sub_lock:
+        _subscribers.add(q)
+    try:
+        yield f"data: {json.dumps({'type': 'connected', 'data': {}})}\n\n"
+        while True:
+            try:
+                msg = await asyncio.wait_for(q.get(), timeout=20.0)
+                yield f"data: {msg}\n\n"
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+    finally:
+        with _sub_lock:
+            _subscribers.discard(q)
+
+
+def _serialize_job_task(j: JobTask) -> dict[str, Any]:
+    res = None
+    if j.result_json:
+        try:
+            res = json.loads(j.result_json)
+        except Exception:
+            res = None
+    return {
+        "id": j.id,
+        "project_id": j.project_id,
+        "shot_id": j.shot_id,
+        "kind": j.kind,
+        "status": j.status,
+        "progress": j.progress,
+        "message": j.message,
+        "result": res,
+        "error": j.error,
+        "estimated_cost_usd": j.estimated_cost_usd,
+        "created_at": j.created_at.isoformat() if j.created_at else None,
+        "updated_at": j.updated_at.isoformat() if j.updated_at else None,
+    }
 
 
 def create_job_record(
@@ -28,6 +98,7 @@ def create_job_record(
         db.add(job)
         db.commit()
         db.refresh(job)
+        publish_event("task_update", _serialize_job_task(job))
         return job
     finally:
         db.close()
@@ -59,6 +130,8 @@ def update_job_record(
             job.error = error
         job.updated_at = utcnow()
         db.commit()
+        db.refresh(job)
+        publish_event("task_update", _serialize_job_task(job))
     finally:
         db.close()
 
@@ -92,16 +165,18 @@ def record_cost(
 def submit_background_job(
     task_id: str,
     worker_fn: Callable[[Callable[[int, str], None]], dict[str, Any]],
+    *,
+    use_chain_pool: bool = False,
 ) -> None:
-    """Schedule a blocking media/AI worker in a thread pool and update SQLite JobTask state."""
+    """Schedule a blocking media/AI worker in a bounded thread pool and update SQLite JobTask state."""
 
     def _progress_cb(pct: int, msg: str) -> None:
         update_job_record(task_id, status="running", progress=pct, message=msg)
 
-    async def _runner() -> None:
+    def _run_sync() -> None:
         update_job_record(task_id, status="running", progress=10, message="正在执行...")
         try:
-            result = await asyncio.to_thread(worker_fn, _progress_cb)
+            result = worker_fn(_progress_cb)
             update_job_record(
                 task_id,
                 status="completed",
@@ -115,11 +190,15 @@ def submit_background_job(
                 status="failed",
                 progress=100,
                 message="任务执行失败",
-                error=str(exc),
+                error=sanitize_error(exc),
             )
 
-    loop = asyncio.get_running_loop()
-    loop.create_task(_runner())
+    pool = _chain_pool if use_chain_pool else _worker_pool
+    pool.submit(_run_sync)
+
+
+def submit_studio_worker(fn: Callable[[], None]) -> None:
+    _worker_pool.submit(fn)
 
 
 def mark_stale_jobs_on_startup() -> None:
@@ -132,7 +211,19 @@ def mark_stale_jobs_on_startup() -> None:
             job.error = "服务重启中断了上次任务，请重新触发"
             job.message = "已中断"
             job.updated_at = utcnow()
-        if stale:
+
+        stale_studio = (
+            db.query(StudioJob)
+            .filter(StudioJob.status.in_(["queued", "uploading", "generating", "downloading"]))
+            .all()
+        )
+        for sj in stale_studio:
+            sj.status = "failed"
+            sj.error_message = "任务在后端重启时中断，请重新发起生成。"
+            sj.progress_message = "已中断"
+            sj.updated_at = utcnow()
+
+        if stale or stale_studio:
             db.commit()
     finally:
         db.close()

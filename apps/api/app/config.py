@@ -30,9 +30,10 @@ if ENV_PATH.exists():
 
 # Estimated USD unit costs (2026 Google AI pricing references)
 COST_RATES = {
-    "chat": 0.005,                 # per director agent turn (Gemini Flash/Pro)
+    "chat": 0.005,                 # per director agent turn (Gemini 4)
+    "enhance": 0.003,              # per Omni prompt enhancement (Gemini 4)
     "qa": 0.01,                    # per video QA review
-    "image": 0.055,                # per Nano Banana 2 (1K-2K) generation
+    "image": 0.055,                # per Nano Banana 2.1 (1K-2K) generation
     "turnaround": 0.067,           # per 3-view character turnaround sheet
     "veo_lite_per_sec": 0.05,      # Veo 3.1 Lite
     "veo_fast_per_sec": 0.12,      # Veo 3.1 Fast
@@ -40,10 +41,11 @@ COST_RATES = {
     "omni_flash_per_sec": 0.03,    # Gemini Omni 1.2 Flash estimated video cost/sec
     "music_clip": 0.04,            # Lyria 3 30s clip
     "music_pro": 0.08,             # Lyria 3 Pro full song
+    "music_lyria35": 0.06,         # Lyria 3.5 music generation
 }
 
 
-def estimate_video_cost(engine: str, duration_sec: int) -> float:
+def estimate_video_cost(engine: str, duration_sec: int, resolution: str = "720p") -> float:
     if engine in ("flow_import", "demo"):
         return 0.0
     rate_map = {
@@ -52,7 +54,8 @@ def estimate_video_cost(engine: str, duration_sec: int) -> float:
         "veo_standard": COST_RATES["veo_standard_per_sec"],
         "omni_flash": COST_RATES["omni_flash_per_sec"],
     }
-    return round(rate_map.get(engine, 0.05) * max(1, duration_sec), 3)
+    mult = 1.5 if (engine == "omni_flash" and resolution.lower() == "4k") else 1.0
+    return round(rate_map.get(engine, 0.05) * max(1, duration_sec) * mult, 3)
 
 
 class RuntimeSettings(BaseModel):
@@ -61,13 +64,15 @@ class RuntimeSettings(BaseModel):
     vertex_project_id: str = ""
     vertex_location: str = "us-central1"
     google_application_credentials: str = ""
-    text_model: str = "gemini-2.5-flash"
-    image_model: str = "gemini-3.1-flash-image"
+    text_model: str = "gemini-4-hydrogen"
+    image_model: str = "gemini-nano-banana-2.1"
     omni_video_model: str = "gemini-omni-1.2-flash"
     veo_lite_model: str = "veo-3.1-lite-generate-001"
     veo_fast_model: str = "veo-3.1-fast-generate-001"
     veo_standard_model: str = "veo-3.1-generate-001"
-    music_model: str = "lyria-3-clip-preview"
+    music_model: str = "lyria-3.5"
+    max_concurrent_jobs: int = 3
+    video_request_timeout: int = 900
     monthly_budget_usd: float = 40.0
 
     @property
@@ -100,6 +105,8 @@ ENV_KEY_MAP = {
     "veo_fast_model": "VEO_FAST_MODEL",
     "veo_standard_model": "VEO_STANDARD_MODEL",
     "music_model": "MUSIC_MODEL",
+    "max_concurrent_jobs": "MAX_CONCURRENT_JOBS",
+    "video_request_timeout": "VIDEO_REQUEST_TIMEOUT",
     "monthly_budget_usd": "MONTHLY_BUDGET_USD",
 }
 
@@ -129,6 +136,16 @@ def load_settings() -> RuntimeSettings:
     except ValueError:
         budget = 40.0
 
+    try:
+        max_jobs = max(1, min(6, int(_get("MAX_CONCURRENT_JOBS", "3") or 3)))
+    except ValueError:
+        max_jobs = 3
+
+    try:
+        req_timeout = max(120, min(1800, int(_get("VIDEO_REQUEST_TIMEOUT", "900") or 900)))
+    except ValueError:
+        req_timeout = 900
+
     creds_path = _get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
     if creds_path:
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
@@ -139,13 +156,15 @@ def load_settings() -> RuntimeSettings:
         vertex_project_id=_get("VERTEX_PROJECT_ID", "").strip(),
         vertex_location=_get("VERTEX_LOCATION", "us-central1").strip() or "us-central1",
         google_application_credentials=creds_path,
-        text_model=_get("TEXT_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash",
-        image_model=_get("IMAGE_MODEL", "gemini-3.1-flash-image").strip() or "gemini-3.1-flash-image",
+        text_model=_get("TEXT_MODEL", "gemini-4-hydrogen").strip() or "gemini-4-hydrogen",
+        image_model=_get("IMAGE_MODEL", "gemini-nano-banana-2.1").strip() or "gemini-nano-banana-2.1",
         omni_video_model=_get("OMNI_VIDEO_MODEL", "gemini-omni-1.2-flash").strip() or "gemini-omni-1.2-flash",
         veo_lite_model=_get("VEO_LITE_MODEL", "veo-3.1-lite-generate-001").strip() or "veo-3.1-lite-generate-001",
         veo_fast_model=_get("VEO_FAST_MODEL", "veo-3.1-fast-generate-001").strip() or "veo-3.1-fast-generate-001",
         veo_standard_model=_get("VEO_STANDARD_MODEL", "veo-3.1-generate-001").strip() or "veo-3.1-generate-001",
-        music_model=_get("MUSIC_MODEL", "lyria-3-clip-preview").strip() or "lyria-3-clip-preview",
+        music_model=_get("MUSIC_MODEL", "lyria-3.5").strip() or "lyria-3.5",
+        max_concurrent_jobs=max_jobs,
+        video_request_timeout=req_timeout,
         monthly_budget_usd=budget,
     )
 
@@ -163,8 +182,17 @@ def save_settings_updates(updates: dict) -> RuntimeSettings:
         # Keep existing secret if caller sent masked sentinel
         if field_name == "gemini_api_key" and str_val.startswith("••••"):
             continue
+        if field_name == "max_concurrent_jobs":
+            str_val = str(max(1, min(6, int(value))))
+        elif field_name == "video_request_timeout":
+            str_val = str(max(120, min(1800, int(value))))
         set_key(str(ENV_PATH), env_key, str_val, quote_mode="never")
         os.environ[env_key] = str_val
+
+    try:
+        os.chmod(ENV_PATH, 0o600)
+    except OSError:
+        pass
 
     return load_settings()
 

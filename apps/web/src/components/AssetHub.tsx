@@ -1,17 +1,37 @@
 import React, { useState } from "react";
-import { Image as ImageIcon, Layers, Plus, Sparkles, Trash2, Upload } from "lucide-react";
-import type { Asset, Project } from "../types";
+import {
+  Camera,
+  Film,
+  Image as ImageIcon,
+  Layers,
+  Plus,
+  Scissors,
+  Send,
+  Sparkles,
+  Trash2,
+  Upload,
+  VolumeX,
+} from "lucide-react";
+import { formatBytes, formatDuration } from "../api";
+import type { Asset, Project, StudioDraftInjection } from "../types";
 
 interface AssetHubProps {
   project: Project;
   assets: Asset[];
   onUpdateProject: (patch: Partial<Project>) => Promise<void>;
   onCreateAsset: (payload: { name: string; kind: string; description: string }) => Promise<void>;
+  onUploadMediaFiles: (files: FileList) => Promise<void>;
   onUpdateAsset: (id: string, patch: Partial<Asset>) => Promise<void>;
   onDeleteAsset: (id: string) => Promise<void>;
   onUploadAsset: (id: string, file: File) => Promise<void>;
+  onPrepAsset: (
+    id: string,
+    payload: { start_seconds?: number; duration?: number; strip_audio?: boolean; max_edge?: number }
+  ) => Promise<void>;
+  onExtractFrame: (id: string, position: "first" | "last") => Promise<void>;
   onGenerateImage: (id: string) => Promise<void>;
   onGenerateTurnaround: (id: string) => Promise<void>;
+  onSendToStudio: (draft: Omit<StudioDraftInjection, "nonce">) => void;
 }
 
 const KIND_LABELS: Record<string, string> = {
@@ -19,6 +39,7 @@ const KIND_LABELS: Record<string, string> = {
   scene: "场景",
   prop: "道具",
   audio: "音频",
+  video: "视频素材",
 };
 
 export const AssetHub: React.FC<AssetHubProps> = ({
@@ -26,11 +47,15 @@ export const AssetHub: React.FC<AssetHubProps> = ({
   assets,
   onUpdateProject,
   onCreateAsset,
+  onUploadMediaFiles,
   onUpdateAsset,
   onDeleteAsset,
   onUploadAsset,
+  onPrepAsset,
+  onExtractFrame,
   onGenerateImage,
   onGenerateTurnaround,
+  onSendToStudio,
 }) => {
   const [name, setName] = useState("");
   const [kind, setKind] = useState<"character" | "scene" | "prop">("character");
@@ -75,9 +100,29 @@ export const AssetHub: React.FC<AssetHubProps> = ({
         </div>
       </div>
 
-      {/* Add new asset */}
+      {/* Add new asset + Batch Media Upload */}
       <form onSubmit={handleAdd} className="rounded-xl border border-studio-border bg-studio-card p-4">
-        <div className="mb-3 text-xs font-semibold text-slate-200">新增一致性资产（角色 / 场景 / 道具）</div>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <span className="text-xs font-semibold text-slate-200">
+            新增一致性资产（角色 / 场景 / 道具）或批量上传图片/视频素材
+          </span>
+          <label className="studio-btn-secondary cursor-pointer text-xs">
+            <Upload className="h-3.5 w-3.5 text-cyan-400" />
+            批量上传图片 / 视频 (MP4/MOV/PNG/JPG)
+            <input
+              type="file"
+              multiple
+              accept="image/*,video/*"
+              className="hidden"
+              onChange={(e) => {
+                if (e.target.files && e.target.files.length > 0) {
+                  onUploadMediaFiles(e.target.files);
+                }
+                e.target.value = "";
+              }}
+            />
+          </label>
+        </div>
         <div className="grid grid-cols-1 gap-3 md:grid-cols-12">
           <input
             className="studio-input md:col-span-3"
@@ -110,106 +155,213 @@ export const AssetHub: React.FC<AssetHubProps> = ({
       {/* Asset Grid */}
       {assets.length === 0 ? (
         <div className="rounded-xl border border-dashed border-studio-border p-10 text-center text-sm text-slate-500">
-          暂无项目资产。你可以在上方手动添加，或者在左侧让导演 Agent 根据创意自动拆解角色与场景！
+          暂无项目资产。你可以在上方手动添加/批量上传，或者在左侧让导演 Agent 根据创意自动拆解角色与场景！
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-          {assets.map((asset) => (
-            <div
-              key={asset.id}
-              className="flex flex-col justify-between rounded-xl border border-studio-border bg-studio-card p-4"
-            >
-              <div>
-                <div className="mb-3 flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className="rounded bg-indigo-500/20 px-2 py-0.5 text-[11px] font-medium text-indigo-300">
-                      {KIND_LABELS[asset.kind] || asset.kind}
-                    </span>
-                    <h3 className="text-sm font-semibold text-white">@{asset.name}</h3>
+          {assets.map((asset) => {
+            const isVideo = asset.media_type === "video" || asset.kind === "video";
+            return (
+              <div
+                key={asset.id}
+                className="flex flex-col justify-between rounded-xl border border-studio-border bg-studio-card p-4"
+              >
+                <div>
+                  <div className="mb-3 flex items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span
+                        className={`rounded px-2 py-0.5 text-[11px] font-medium ${
+                          isVideo ? "bg-cyan-500/20 text-cyan-300" : "bg-indigo-500/20 text-indigo-300"
+                        }`}
+                      >
+                        {KIND_LABELS[asset.kind] || asset.kind}
+                      </span>
+                      <h3 className="text-sm font-semibold text-white">@{asset.name}</h3>
+                      {(asset.width || asset.duration_sec) && (
+                        <span className="font-mono text-[10px] text-slate-400">
+                          {asset.width && asset.height ? `${asset.width}x${asset.height}` : ""}
+                          {asset.duration_sec ? ` · ${formatDuration(asset.duration_sec)}` : ""}
+                          {asset.fps ? ` · ${asset.fps}` : ""}
+                          {isVideo ? (asset.has_audio ? " · 含音轨" : " · 无音轨") : ""}
+                          {asset.size_bytes ? ` · ${formatBytes(asset.size_bytes)}` : ""}
+                        </span>
+                      )}
+                    </div>
+                    <button
+                      className="studio-btn-ghost text-rose-400 hover:text-rose-300"
+                      onClick={() => onDeleteAsset(asset.id)}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
                   </div>
-                  <button
-                    className="studio-btn-ghost text-rose-400 hover:text-rose-300"
-                    onClick={() => onDeleteAsset(asset.id)}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
 
-                {/* Image previews */}
-                <div className="mb-3 grid grid-cols-2 gap-2">
-                  <div className="relative aspect-video overflow-hidden rounded-lg border border-studio-border bg-studio-bg">
-                    {asset.file_url ? (
-                      <img src={asset.file_url} alt={asset.name} className="h-full w-full object-cover" />
-                    ) : (
-                      <div className="flex h-full flex-col items-center justify-center gap-1 text-xs text-slate-600">
-                        <ImageIcon className="h-6 w-6" />
-                        <span>待定妆</span>
+                  {/* Previews */}
+                  {isVideo ? (
+                    <div className="relative mb-3 aspect-video overflow-hidden rounded-lg border border-studio-border bg-black">
+                      {asset.file_url ? (
+                        <video src={asset.file_url} controls className="h-full w-full" />
+                      ) : (
+                        <div className="flex h-full flex-col items-center justify-center gap-1 text-xs text-slate-600">
+                          <Film className="h-6 w-6" />
+                          <span>待上传视频</span>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="mb-3 grid grid-cols-2 gap-2">
+                      <div className="relative aspect-video overflow-hidden rounded-lg border border-studio-border bg-studio-bg">
+                        {asset.file_url ? (
+                          <img src={asset.file_url} alt={asset.name} className="h-full w-full object-cover" />
+                        ) : (
+                          <div className="flex h-full flex-col items-center justify-center gap-1 text-xs text-slate-600">
+                            <ImageIcon className="h-6 w-6" />
+                            <span>待定妆</span>
+                          </div>
+                        )}
+                        <span className="absolute bottom-1 left-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-slate-300">
+                          主参考图
+                        </span>
                       </div>
-                    )}
-                    <span className="absolute bottom-1 left-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-slate-300">
-                      主参考图
-                    </span>
-                  </div>
 
-                  <div className="relative aspect-video overflow-hidden rounded-lg border border-studio-border bg-studio-bg">
-                    {asset.turnaround_url ? (
-                      <img
-                        src={asset.turnaround_url}
-                        alt={`${asset.name} turnaround`}
-                        className="h-full w-full object-cover"
-                      />
-                    ) : (
-                      <div className="flex h-full flex-col items-center justify-center gap-1 text-xs text-slate-600">
-                        <Layers className="h-6 w-6" />
-                        <span>三视图（可选）</span>
+                      <div className="relative aspect-video overflow-hidden rounded-lg border border-studio-border bg-studio-bg">
+                        {asset.turnaround_url ? (
+                          <img
+                            src={asset.turnaround_url}
+                            alt={`${asset.name} turnaround`}
+                            className="h-full w-full object-cover"
+                          />
+                        ) : (
+                          <div className="flex h-full flex-col items-center justify-center gap-1 text-xs text-slate-600">
+                            <Layers className="h-6 w-6" />
+                            <span>三视图（可选）</span>
+                          </div>
+                        )}
+                        <span className="absolute bottom-1 left-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-slate-300">
+                          三视图 Skill
+                        </span>
                       </div>
-                    )}
-                    <span className="absolute bottom-1 left-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-slate-300">
-                      三视图 Skill
-                    </span>
-                  </div>
-                </div>
+                    </div>
+                  )}
 
-                <textarea
-                  rows={2}
-                  className="studio-input mb-3 text-xs"
-                  defaultValue={asset.description}
-                  onBlur={(e) => {
-                    if (e.target.value !== asset.description) {
-                      onUpdateAsset(asset.id, { description: e.target.value });
-                    }
-                  }}
-                />
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2">
-                <button className="studio-btn-primary" onClick={() => onGenerateImage(asset.id)}>
-                  <Sparkles className="h-3.5 w-3.5" />
-                  Nano Banana 定妆 (~$0.06)
-                </button>
-                {asset.kind === "character" && (
-                  <button className="studio-btn-secondary" onClick={() => onGenerateTurnaround(asset.id)}>
-                    <Layers className="h-3.5 w-3.5" />
-                    生成三视图 (~$0.07)
-                  </button>
-                )}
-                <label className="studio-btn-secondary cursor-pointer">
-                  <Upload className="h-3.5 w-3.5" />
-                  上传参考图
-                  <input
-                    type="file"
-                    accept="image/*"
-                    className="hidden"
-                    onChange={(e) => {
-                      const f = e.target.files?.[0];
-                      if (f) onUploadAsset(asset.id, f);
-                      e.target.value = "";
+                  <textarea
+                    rows={2}
+                    className="studio-input mb-3 text-xs"
+                    defaultValue={asset.description}
+                    onBlur={(e) => {
+                      if (e.target.value !== asset.description) {
+                        onUpdateAsset(asset.id, { description: e.target.value });
+                      }
                     }}
                   />
-                </label>
+                </div>
+
+                {/* Actions */}
+                <div className="flex flex-wrap items-center gap-2">
+                  {!isVideo && (
+                    <>
+                      <button className="studio-btn-primary" onClick={() => onGenerateImage(asset.id)}>
+                        <Sparkles className="h-3.5 w-3.5" />
+                        Nano Banana 2.1 定妆 (~$0.06)
+                      </button>
+                      {asset.kind === "character" && (
+                        <button className="studio-btn-secondary" onClick={() => onGenerateTurnaround(asset.id)}>
+                          <Layers className="h-3.5 w-3.5" />
+                          生成三视图 (~$0.07)
+                        </button>
+                      )}
+                      {asset.file_url && (
+                        <>
+                          <button
+                            className="studio-btn-secondary text-[11px]"
+                            onClick={() => onSendToStudio({ tabMode: "keyframes", firstFrameAssetId: asset.id })}
+                            title="发送该图至全模态自由创作台作为首帧"
+                          >
+                            <Send className="h-3 w-3 text-indigo-400" />
+                            作首帧
+                          </button>
+                          <button
+                            className="studio-btn-secondary text-[11px]"
+                            onClick={() => onSendToStudio({ tabMode: "create", addRefImageAssetId: asset.id })}
+                            title="加入全模态自由创作台 R2V 参考图"
+                          >
+                            <Plus className="h-3 w-3 text-cyan-400" />
+                            作参考图
+                          </button>
+                        </>
+                      )}
+                    </>
+                  )}
+
+                  {isVideo && asset.file_url && (
+                    <>
+                      <button
+                        className="studio-btn-secondary text-[11px]"
+                        onClick={() => onPrepAsset(asset.id, { start_seconds: 0, duration: 3, max_edge: 1280 })}
+                        title="FFmpeg 裁剪 3 秒参考片段（适合 R2V 视频参考）"
+                      >
+                        <Scissors className="h-3 w-3 text-cyan-400" />
+                        3s R2V 裁剪
+                      </button>
+                      <button
+                        className="studio-btn-secondary text-[11px]"
+                        onClick={() => onPrepAsset(asset.id, { start_seconds: 0, duration: 10, max_edge: 1280 })}
+                        title="FFmpeg 优化为 10s 720p（适合 V2V 编辑/续写）"
+                      >
+                        <Scissors className="h-3 w-3 text-indigo-400" />
+                        10s 编辑优化
+                      </button>
+                      <button
+                        className="studio-btn-secondary text-[11px]"
+                        onClick={() =>
+                          onPrepAsset(asset.id, { start_seconds: 0, duration: 10, strip_audio: true, max_edge: 1280 })
+                        }
+                        title="裁剪 10s 并剥离原音轨，让 Omni 重配全套声音"
+                      >
+                        <VolumeX className="h-3 w-3 text-amber-400" />
+                        10s 剥音裁剪
+                      </button>
+                      <button
+                        className="studio-btn-secondary text-[11px]"
+                        onClick={() => onExtractFrame(asset.id, "first")}
+                      >
+                        <Camera className="h-3 w-3" />
+                        抽首帧
+                      </button>
+                      <button
+                        className="studio-btn-secondary text-[11px]"
+                        onClick={() => onExtractFrame(asset.id, "last")}
+                      >
+                        <Camera className="h-3 w-3" />
+                        抽尾帧
+                      </button>
+                      <button
+                        className="studio-btn-primary text-[11px]"
+                        onClick={() => onSendToStudio({ tabMode: "edit", sourceVideoAssetId: asset.id })}
+                      >
+                        <Send className="h-3 w-3" />
+                        去 V2V 改片
+                      </button>
+                    </>
+                  )}
+
+                  <label className="studio-btn-secondary cursor-pointer text-[11px]">
+                    <Upload className="h-3.5 w-3.5" />
+                    替换文件
+                    <input
+                      type="file"
+                      accept={isVideo ? "video/*" : "image/*"}
+                      className="hidden"
+                      onChange={(e) => {
+                        const f = e.target.files?.[0];
+                        if (f) onUploadAsset(asset.id, f);
+                        e.target.value = "";
+                      }}
+                    />
+                  </label>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

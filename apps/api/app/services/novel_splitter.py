@@ -6,10 +6,47 @@ import json
 import re
 import xml.etree.ElementTree as ET
 import zipfile
-from typing import Any
+from typing import Any, Literal
+
+from pydantic import BaseModel, Field
 
 from app.config import RuntimeSettings, load_settings
-from app.services.google_ai import _get_gemini_client
+from app.services.genai_utils import create_genai_client
+
+
+class BookBibleAssetItem(BaseModel):
+    name: str
+    kind: Literal["character", "scene", "prop"] = "character"
+    description: str
+
+
+class EpisodeSummaryItem(BaseModel):
+    order_index: int
+    summary: str
+
+
+class BookBibleOutput(BaseModel):
+    style_prompt: str
+    bgm_prompt: str
+    assets: list[BookBibleAssetItem] = Field(default_factory=list)
+    episode_summaries: list[EpisodeSummaryItem] = Field(default_factory=list)
+
+
+class EpisodeShotItem(BaseModel):
+    title: str
+    shot_type: str = "中景"
+    camera_movement: str = "缓慢推进"
+    visual_prompt_zh: str
+    video_prompt_en: str
+    dialogue: str = ""
+    sfx_prompt: str = ""
+    duration_sec: int = Field(default=6, ge=3, le=15)
+    asset_names: list[str] = Field(default_factory=list)
+
+
+class EpisodeBreakdownOutput(BaseModel):
+    summary: str
+    shots: list[EpisodeShotItem] = Field(default_factory=list)
 
 # Matches common Chinese & English novel chapter headings at the start of a line
 CHAPTER_HEADING_RE = re.compile(
@@ -236,10 +273,8 @@ def extract_book_bible(
             True,
         )
 
-    from google.genai import types  # type: ignore
-
-    client = _get_gemini_client(cfg)
-    # Concatenate chapters up to ~280,000 chars (well within Gemini 1M token window!)
+    client = create_genai_client(cfg, timeout_seconds=180)
+    # Concatenate chapters up to ~280,000 chars (well within Gemini 4 1M token window!)
     parts: list[str] = [f"小说名称：《{novel_title}》\n"]
     total_chars = 0
     for ep in episodes:
@@ -249,17 +284,22 @@ def extract_book_bible(
         parts.append(chunk)
         total_chars += len(chunk)
 
-    response = client.models.generate_content(
+    interaction = client.interactions.create(
         model=cfg.text_model,
-        contents="".join(parts),
-        config=types.GenerateContentConfig(
-            system_instruction=BOOK_BIBLE_SYSTEM_PROMPT,
-            response_mime_type="application/json",
-            temperature=0.4,
-        ),
+        system_instruction=BOOK_BIBLE_SYSTEM_PROMPT,
+        input="".join(parts),
+        response_format={
+            "type": "text",
+            "mime_type": "application/json",
+            "schema": BookBibleOutput.model_json_schema(),
+        },
+        store=False,
     )
-    raw = (response.text or "{}").strip()
-    parsed = json.loads(raw)
+    raw = (interaction.output_text or "{}").strip()
+    try:
+        parsed = BookBibleOutput.model_validate_json(raw).model_dump()
+    except Exception:
+        parsed = json.loads(raw)
     return parsed, cfg.text_model, False
 
 
@@ -269,23 +309,9 @@ EPISODE_BREAKDOWN_SYSTEM_PROMPT = """你是一位擅长把网文/小说改编为
 2. 上一集剧情衔接摘要（如有）
 3. 本集小说原文与目标镜头数
 
-请将本集原文改编为极具画面感、节奏紧凑、适合 Veo 3.1 / Google Flow 生成的连续分镜脚本，严格输出如下 JSON：
-{
-  "summary": "本集 60 字以内剧情梗概（将用于下一集衔接）",
-  "shots": [
-    {
-      "title": "简短镜头标题",
-      "shot_type": "远景|全景|中景|中近景|近景|特写",
-      "camera_movement": "缓慢推进|缓慢拉远|横摇|侧面跟拍|俯拍航拍|环绕运镜|固定机位",
-      "visual_prompt_zh": "中文详细画面动作与情绪描述",
-      "video_prompt_en": "Cinematic English prompt for Veo 3.1/Flow: framing, subject appearance & action, camera move, lighting, atmosphere, and synchronized ambient audio",
-      "dialogue": "该镜头内的核心台词或精炼旁白（中文，控制在 18 字内便于 6 秒镜头说完，可留空）",
-      "sfx_prompt": "同期环境音与关键音效",
-      "duration_sec": 6,
-      "asset_names": ["本镜头出现的全局资产准确名称"]
-    }
-  ]
-}"""
+请将本集原文改编为极具画面感、节奏紧凑、适合 Veo 3.1 / Gemini Omni 1.2 Flash / Google Flow 生成的连续分镜脚本，严格输出 JSON：
+- 每个镜头的 `video_prompt_en` 遵循 Omni 1.2 Flash 与 Veo 3.1 规范：使用自然语言描述构图、动作、光影与同期声，默认加入 "Continuous, unbroken single shot, no scene cuts"，严禁使用已废弃 XML 标签。
+- `dialogue` 为该镜头内的核心台词或精炼旁白（中文，控制在 18 字内便于 6 秒镜头说完，可留空）。"""
 
 
 def breakdown_episode_to_shots(
@@ -336,9 +362,7 @@ def breakdown_episode_to_shots(
             True,
         )
 
-    from google.genai import types  # type: ignore
-
-    client = _get_gemini_client(cfg)
+    client = create_genai_client(cfg, timeout_seconds=180)
     payload_text = (
         f"全剧画风：{project_style}\n"
         f"全局资产库（asset_names 必须从以下 name 中精确挑选）：\n"
@@ -349,15 +373,20 @@ def breakdown_episode_to_shots(
         f"{episode_text[:30000]}"
     )
 
-    response = client.models.generate_content(
+    interaction = client.interactions.create(
         model=cfg.text_model,
-        contents=payload_text,
-        config=types.GenerateContentConfig(
-            system_instruction=EPISODE_BREAKDOWN_SYSTEM_PROMPT,
-            response_mime_type="application/json",
-            temperature=0.6,
-        ),
+        system_instruction=EPISODE_BREAKDOWN_SYSTEM_PROMPT,
+        input=payload_text,
+        response_format={
+            "type": "text",
+            "mime_type": "application/json",
+            "schema": EpisodeBreakdownOutput.model_json_schema(),
+        },
+        store=False,
     )
-    raw = (response.text or "{}").strip()
-    parsed = json.loads(raw)
+    raw = (interaction.output_text or "{}").strip()
+    try:
+        parsed = EpisodeBreakdownOutput.model_validate_json(raw).model_dump()
+    except Exception:
+        parsed = json.loads(raw)
     return parsed, cfg.text_model, False

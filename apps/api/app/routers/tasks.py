@@ -2,12 +2,28 @@ from __future__ import annotations
 
 import json
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.database import JobTask, get_db
 from app.schemas import JobTaskOut
+from app.services.task_runner import subscribe_events
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
+
+
+@router.get("/events")
+async def stream_task_events() -> StreamingResponse:
+    """Server-Sent Events stream for real-time JobTask and StudioJob status updates."""
+    return StreamingResponse(
+        subscribe_events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def serialize_job(j: JobTask) -> JobTaskOut:
