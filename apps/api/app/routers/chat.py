@@ -65,7 +65,16 @@ def send_director_message(project_id: str, payload: ChatSendRequest, db: Session
         "description": proj.description,
         "aspect_ratio": proj.aspect_ratio,
         "style_prompt": proj.style_prompt,
-        "assets": [{"id": a.id, "name": a.name, "kind": a.kind, "description": a.description} for a in proj.assets],
+        "assets": [
+            {
+                "id": a.id,
+                "name": a.name,
+                "kind": a.kind,
+                "description": a.description,
+                "file_path": a.file_path,
+            }
+            for a in proj.assets
+        ],
         "shots": [
             {
                 "order": s.order_index + 1,

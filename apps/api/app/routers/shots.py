@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, Callable
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
-from app.config import COST_RATES, estimate_video_cost
+from app.config import COST_RATES, estimate_video_cost, load_settings
 from app.database import Asset, Project, SessionLocal, Shot, Take, get_db
 from app.schemas import (
+    BatchGenerateShotsRequest,
+    IterateTakeRequest,
     JobTaskOut,
     KeyframeGenerateRequest,
     ShotCreate,
@@ -17,7 +20,7 @@ from app.schemas import (
     VideoGenerateRequest,
 )
 from app.services.google_ai import generate_image, generate_video, review_video_qa
-from app.services.media_renderer import extract_frame, probe_media_info
+from app.services.media_renderer import extract_frame, extract_video_frame, probe_media_info
 from app.services.storage import allocate_rel_path, resolve_abs_path, to_media_url
 from app.services.task_runner import create_job_record, record_cost, submit_background_job
 
@@ -34,8 +37,12 @@ def serialize_take(t: Take) -> TakeOut:
         file_url=to_media_url(t.file_path) or "",
         thumbnail_url=to_media_url(t.thumbnail_path),
         duration_sec=t.duration_sec,
+        resolution=getattr(t, "resolution", "720p") or "720p",
         has_audio=t.has_audio,
         prompt_used=t.prompt_used,
+        interaction_id=getattr(t, "interaction_id", None),
+        parent_take_id=getattr(t, "parent_take_id", None),
+        mode=getattr(t, "mode", "generate") or "generate",
         qa_score=t.qa_score,
         qa_feedback=t.qa_feedback,
         cost_usd=t.cost_usd,
@@ -136,7 +143,6 @@ def delete_shot(project_id: str, shot_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="镜头不存在")
     db.delete(shot)
     db.commit()
-    # Re-index remaining shots
     remaining = db.query(Shot).filter(Shot.project_id == project_id).order_by(Shot.order_index.asc()).all()
     for i, s in enumerate(remaining):
         s.order_index = i
@@ -200,7 +206,7 @@ async def generate_shot_keyframe(
     )
 
     def _worker(progress_cb):
-        progress_cb(30, f"调用 Nano Banana 2 合成{which_label}...")
+        progress_cb(30, f"调用 Nano Banana 2.1 合成{which_label}...")
         rel_path, abs_path = allocate_rel_path(project_id, "frames", "png", prefix=f"shot_{shot_id}_{payload.which}")
         _, model_used, is_demo = generate_image(
             prompt=prompt,
@@ -268,6 +274,137 @@ def copy_prev_shot_last_frame(project_id: str, shot_id: str, db: Session = Depen
     return serialize_shot(curr_shot)
 
 
+def _compose_shot_prompt(shot: Shot, with_audio: bool, prompt_override_en: str | None = None) -> str:
+    prompt_en = (prompt_override_en or "").strip() or shot.video_prompt_en or shot.visual_prompt_zh
+    if with_audio and shot.sfx_prompt and shot.sfx_prompt.lower() not in prompt_en.lower():
+        prompt_en = f"{prompt_en}. Synchronized audio & SFX: {shot.sfx_prompt}."
+    if with_audio and shot.dialogue:
+        prompt_en = f'{prompt_en} Spoken dialogue: "{shot.dialogue}".'
+    return prompt_en
+
+
+def _execute_shot_video_sync(
+    *,
+    project_id: str,
+    shot_id: str,
+    task_id: str,
+    engine: str,
+    duration_sec: int,
+    resolution: str,
+    with_audio: bool,
+    use_end_frame: bool,
+    prompt_override_en: str | None = None,
+    progress_cb: Callable[[int, str], None] | None = None,
+) -> dict[str, Any]:
+    """Execute video generation for a single shot synchronously inside a worker thread."""
+    session = SessionLocal()
+    try:
+        proj = session.get(Project, project_id)
+        shot = session.query(Shot).filter(Shot.id == shot_id, Shot.project_id == project_id).first()
+        if not proj or not shot:
+            raise ValueError("项目或镜头不存在")
+
+        try:
+            asset_ids = json.loads(shot.asset_ids_json or "[]")
+        except Exception:
+            asset_ids = []
+        assets = session.query(Asset).filter(Asset.id.in_(asset_ids)).all() if asset_ids else []
+        ref_paths: list[Path] = []
+        ref_ids: list[str | None] = []
+        for a in assets:
+            rp = resolve_abs_path(a.file_path)
+            if rp and rp.exists() and (a.media_type or "image") == "image":
+                ref_paths.append(rp)
+                ref_ids.append(a.id)
+
+        start_abs = resolve_abs_path(shot.start_frame_path)
+        end_abs = resolve_abs_path(shot.end_frame_path) if use_end_frame else None
+        prompt_en = _compose_shot_prompt(shot, with_audio, prompt_override_en)
+        aspect_ratio = proj.aspect_ratio
+        shot_title = shot.title
+    finally:
+        session.close()
+
+    eff_duration = int(duration_sec)
+    if engine == "omni_flash" and start_abs and end_abs and eff_duration > 10:
+        eff_duration = 10
+
+    mode = (
+        "first_last_frame"
+        if (start_abs and end_abs)
+        else ("first_frame" if start_abs else ("reference_to_video" if ref_paths else "text_to_video"))
+    )
+    est_cost = estimate_video_cost(engine, eff_duration, resolution)
+
+    rel_vid, abs_vid = allocate_rel_path(project_id, "takes", "mp4", prefix=f"take_{shot_id}")
+    _, model_used, is_demo, interaction_id = generate_video(
+        engine=engine,
+        prompt_en=prompt_en,
+        output_path=abs_vid,
+        duration_sec=eff_duration,
+        aspect_ratio=aspect_ratio,
+        resolution=resolution,
+        mode=mode,
+        start_frame_path=start_abs,
+        end_frame_path=end_abs,
+        reference_image_paths=ref_paths,
+        ref_image_asset_ids=ref_ids,
+        with_audio=with_audio,
+        badge_title=shot_title,
+        on_progress=progress_cb,
+    )
+
+    if progress_cb:
+        progress_cb(92, "提取封面缩略图与视频元信息...")
+    dur, has_aud = probe_media_info(abs_vid)
+    rel_thumb, abs_thumb = allocate_rel_path(project_id, "takes", "jpg", prefix=f"thumb_{shot_id}")
+    thumb_ok = extract_frame(abs_vid, abs_thumb, at_end=False)
+
+    session2 = SessionLocal()
+    try:
+        take = Take(
+            shot_id=shot_id,
+            project_id=project_id,
+            engine=engine,
+            model_id=model_used,
+            file_path=rel_vid,
+            thumbnail_path=rel_thumb if thumb_ok else None,
+            duration_sec=dur,
+            resolution=resolution,
+            has_audio=has_aud,
+            prompt_used=prompt_en,
+            interaction_id=interaction_id,
+            mode="generate",
+            cost_usd=0.0 if is_demo else est_cost,
+        )
+        session2.add(take)
+        session2.flush()
+        s = session2.get(Shot, shot_id)
+        if s:
+            s.selected_take_id = take.id
+        session2.commit()
+        take_id = take.id
+    finally:
+        session2.close()
+
+    record_cost(
+        project_id,
+        task_id,
+        "video",
+        model_used,
+        est_cost,
+        is_demo,
+        f"{shot_title} ({engine}, {eff_duration}s {resolution})",
+    )
+    return {
+        "shot_id": shot_id,
+        "take_id": take_id,
+        "file_url": to_media_url(rel_vid),
+        "abs_vid": str(abs_vid),
+        "is_demo": is_demo,
+    }
+
+
 @router.post("/{shot_id}/video/generate", response_model=JobTaskOut)
 async def generate_shot_video(
     project_id: str,
@@ -280,77 +417,249 @@ async def generate_shot_video(
     if not proj or not shot:
         raise HTTPException(status_code=404, detail="项目或镜头不存在")
 
-    est_cost = estimate_video_cost(payload.engine, payload.duration_sec)
+    est_cost = estimate_video_cost(payload.engine, payload.duration_sec, payload.resolution)
     job = create_job_record(
         project_id=project_id,
         shot_id=shot_id,
         kind="video",
-        message=f"正在使用 {payload.engine} 生成「{shot.title}」视频 ({payload.duration_sec}s)...",
+        message=f"正在使用 {payload.engine} 生成「{shot.title}」视频 ({payload.duration_sec}s · {payload.resolution})...",
         estimated_cost_usd=est_cost,
     )
 
-    try:
-        asset_ids = json.loads(shot.asset_ids_json or "[]")
-    except Exception:
-        asset_ids = []
-    assets = db.query(Asset).filter(Asset.id.in_(asset_ids)).all() if asset_ids else []
-    ref_paths = [rp for a in assets if (rp := resolve_abs_path(a.file_path)) and rp.exists()]
+    def _worker(progress_cb):
+        res = _execute_shot_video_sync(
+            project_id=project_id,
+            shot_id=shot_id,
+            task_id=job.id,
+            engine=payload.engine,
+            duration_sec=payload.duration_sec,
+            resolution=payload.resolution,
+            with_audio=payload.with_audio,
+            use_end_frame=payload.use_end_frame,
+            prompt_override_en=payload.prompt_override_en,
+            progress_cb=progress_cb,
+        )
+        return {k: v for k, v in res.items() if k != "abs_vid"}
 
-    start_abs = resolve_abs_path(shot.start_frame_path)
-    end_abs = resolve_abs_path(shot.end_frame_path) if payload.use_end_frame else None
+    submit_background_job(job.id, _worker)
+    return _job_to_out(job)
 
-    prompt_en = (payload.prompt_override_en or "").strip() or shot.video_prompt_en or shot.visual_prompt_zh
-    if payload.with_audio and shot.sfx_prompt and shot.sfx_prompt.lower() not in prompt_en.lower():
-        prompt_en = f"{prompt_en}. Synchronized audio & SFX: {shot.sfx_prompt}."
-    if payload.with_audio and shot.dialogue:
-        prompt_en = f'{prompt_en} Spoken dialogue: "{shot.dialogue}".'
+
+@router.post("/batch-generate")
+async def batch_generate_shots(
+    project_id: str,
+    payload: BatchGenerateShotsRequest,
+    db: Session = Depends(get_db),
+):
+    """Batch shoot storyboard shots in parallel or sequentially with automatic last-frame chaining."""
+    proj = db.get(Project, project_id)
+    if not proj:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    q = db.query(Shot).filter(Shot.project_id == project_id)
+    if payload.episode_id:
+        q = q.filter(Shot.episode_id == payload.episode_id)
+    shots = q.order_by(Shot.order_index.asc(), Shot.created_at.asc()).all()
+
+    target_shots = [s for s in shots if not (payload.only_pending and len(s.takes) > 0)]
+    if not target_shots:
+        return {"submitted_count": 0, "tasks": []}
+
+    if not payload.chain_last_frame:
+        created_tasks: list[JobTaskOut] = []
+        for s in target_shots:
+            est_cost = estimate_video_cost(payload.engine, s.duration_sec, payload.resolution)
+            job = create_job_record(
+                project_id=project_id,
+                shot_id=s.id,
+                kind="video",
+                message=f"批量拍片排队中：{s.title} ({s.duration_sec}s · {payload.resolution})",
+                estimated_cost_usd=est_cost,
+            )
+
+            def _make_worker(sid: str, dur: int, tid: str):
+                def _w(progress_cb):
+                    res = _execute_shot_video_sync(
+                        project_id=project_id,
+                        shot_id=sid,
+                        task_id=tid,
+                        engine=payload.engine,
+                        duration_sec=dur,
+                        resolution=payload.resolution,
+                        with_audio=payload.with_audio,
+                        use_end_frame=payload.use_end_frame,
+                        progress_cb=progress_cb,
+                    )
+                    return {k: v for k, v in res.items() if k != "abs_vid"}
+
+                return _w
+
+            submit_background_job(job.id, _make_worker(s.id, s.duration_sec, job.id))
+            created_tasks.append(_job_to_out(job))
+        return {"submitted_count": len(created_tasks), "tasks": created_tasks}
+
+    # Chained sequential execution: shot N's last frame -> shot N+1's start frame
+    total_est = sum(estimate_video_cost(payload.engine, s.duration_sec, payload.resolution) for s in target_shots)
+    shot_specs = [(s.id, s.title, int(s.duration_sec or 6)) for s in target_shots]
+    chain_job = create_job_record(
+        project_id=project_id,
+        kind="batch_chain",
+        message=f"尾帧接力批量拍片启动（共 {len(shot_specs)} 个镜头）...",
+        estimated_cost_usd=round(total_est, 3),
+    )
+
+    def _chain_worker(progress_cb):
+        total = len(shot_specs)
+        completed_ids: list[str] = []
+        for idx, (sid, stitle, sdur) in enumerate(shot_specs):
+            base_pct = int((idx / total) * 85) + 5
+            progress_cb(base_pct, f"尾帧接力 [{idx + 1}/{total}]：正在拍「{stitle}」...")
+
+            def _sub_cb(_pct: int, msg: str, _idx: int = idx, _title: str = stitle) -> None:
+                sub_p = int(((_idx + (_pct / 100.0)) / total) * 90) + 5
+                progress_cb(min(95, sub_p), f"[{_idx + 1}/{total}] {_title}: {msg}")
+
+            res = _execute_shot_video_sync(
+                project_id=project_id,
+                shot_id=sid,
+                task_id=chain_job.id,
+                engine=payload.engine,
+                duration_sec=sdur,
+                resolution=payload.resolution,
+                with_audio=payload.with_audio,
+                use_end_frame=payload.use_end_frame,
+                progress_cb=_sub_cb,
+            )
+            completed_ids.append(res["take_id"])
+
+            if idx + 1 < total:
+                next_sid = shot_specs[idx + 1][0]
+                abs_vid = Path(res["abs_vid"])
+                if abs_vid.exists():
+                    frame_rel, frame_abs = allocate_rel_path(project_id, "frames", "png", prefix=f"chain_{next_sid}")
+                    extract_video_frame(abs_vid, frame_abs, position="last")
+                    s_next = SessionLocal()
+                    try:
+                        ns = s_next.get(Shot, next_sid)
+                        if ns and not ns.start_frame_path:
+                            ns.start_frame_path = frame_rel
+                            s_next.commit()
+                    finally:
+                        s_next.close()
+
+        return {"completed_takes": completed_ids, "count": len(completed_ids)}
+
+    submit_background_job(chain_job.id, _chain_worker, use_chain_pool=True)
+    return {"submitted_count": 1, "tasks": [_job_to_out(chain_job)]}
+
+
+@router.post("/{shot_id}/takes/{take_id}/iterate", response_model=JobTaskOut)
+async def iterate_shot_take(
+    project_id: str,
+    shot_id: str,
+    take_id: str,
+    payload: IterateTakeRequest,
+    db: Session = Depends(get_db),
+):
+    """Multi-turn V2V Edit or Extend on an existing Take using Gemini Omni 1.2 Flash."""
+    proj = db.get(Project, project_id)
+    shot = db.query(Shot).filter(Shot.id == shot_id, Shot.project_id == project_id).first()
+    take = db.query(Take).filter(Take.id == take_id, Take.shot_id == shot_id).first()
+    if not proj or not shot or not take:
+        raise HTTPException(status_code=404, detail="项目、镜头或 Take 不存在")
+
+    if payload.action == "extend" and payload.duration_sec > 10:
+        raise HTTPException(status_code=400, detail="单次视频续写时长上限为 10 秒。")
+
+    cfg = load_settings()
+    take_abs = resolve_abs_path(take.file_path)
+    can_use_interaction = bool(
+        take.interaction_id
+        and not payload.strip_audio
+        and (cfg.effective_mode == "demo" or not str(take.interaction_id).startswith("demo_"))
+    )
+    prev_iid = take.interaction_id if can_use_interaction else None
+    source_vid = None if can_use_interaction else take_abs
+
+    if not prev_iid and (not source_vid or not source_vid.exists()):
+        raise HTTPException(status_code=404, detail="源 Take 视频文件不存在，无法发起改片或续写。")
+
+    ref_imgs: list[Path] = []
+    ref_ids: list[str | None] = []
+    if payload.ref_asset_ids:
+        assets = db.query(Asset).filter(Asset.id.in_(payload.ref_asset_ids[:6]), Asset.project_id == project_id).all()
+        for a in assets:
+            rp = resolve_abs_path(a.file_path)
+            if rp and rp.exists() and (a.media_type or "image") == "image":
+                ref_imgs.append(rp)
+                ref_ids.append(a.id)
+
+    est_cost = estimate_video_cost("omni_flash", payload.duration_sec, payload.resolution)
+    action_label = "续写" if payload.action == "extend" else "多轮改片"
+    job = create_job_record(
+        project_id=project_id,
+        shot_id=shot_id,
+        kind="video",
+        message=f"正在对「{shot.title}」发起 Omni {action_label} ({payload.duration_sec}s · {payload.resolution})...",
+        estimated_cost_usd=est_cost,
+    )
+    aspect_ratio = proj.aspect_ratio
 
     def _worker(progress_cb):
-        rel_vid, abs_vid = allocate_rel_path(project_id, "takes", "mp4", prefix=f"take_{shot_id}")
-        _, model_used, is_demo = generate_video(
-            engine=payload.engine,
-            prompt_en=prompt_en,
+        rel_vid, abs_vid = allocate_rel_path(project_id, "takes", "mp4", prefix=f"{payload.action}_{shot_id}")
+        _, model_used, is_demo, new_iid = generate_video(
+            engine="omni_flash",
+            prompt_en=payload.prompt.strip(),
             output_path=abs_vid,
             duration_sec=payload.duration_sec,
-            aspect_ratio=proj.aspect_ratio,
-            start_frame_path=start_abs,
-            end_frame_path=end_abs,
-            reference_image_paths=ref_paths,
-            with_audio=payload.with_audio,
-            badge_title=shot.title,
+            aspect_ratio=aspect_ratio,
+            resolution=payload.resolution,
+            mode=payload.action,
+            source_video_path=source_vid,
+            source_video_asset_id=None,
+            reference_image_paths=ref_imgs,
+            ref_image_asset_ids=ref_ids,
+            with_audio=not payload.strip_audio,
+            strip_audio=payload.strip_audio,
+            previous_interaction_id=prev_iid,
+            badge_title=f"{shot.title} · {action_label}",
             on_progress=progress_cb,
         )
-        progress_cb(92, "提取封面缩略图与视频元信息...")
+        progress_cb(92, "提取缩略图与视频元信息...")
         dur, has_aud = probe_media_info(abs_vid)
         rel_thumb, abs_thumb = allocate_rel_path(project_id, "takes", "jpg", prefix=f"thumb_{shot_id}")
         thumb_ok = extract_frame(abs_vid, abs_thumb, at_end=False)
 
         session = SessionLocal()
         try:
-            take = Take(
+            new_take = Take(
                 shot_id=shot_id,
                 project_id=project_id,
-                engine=payload.engine,
+                engine="omni_flash",
                 model_id=model_used,
                 file_path=rel_vid,
                 thumbnail_path=rel_thumb if thumb_ok else None,
                 duration_sec=dur,
+                resolution=payload.resolution,
                 has_audio=has_aud,
-                prompt_used=prompt_en,
+                prompt_used=payload.prompt.strip(),
+                interaction_id=new_iid,
+                parent_take_id=take_id,
+                mode=payload.action,
                 cost_usd=0.0 if is_demo else est_cost,
             )
-            session.add(take)
+            session.add(new_take)
             session.flush()
             s = session.get(Shot, shot_id)
             if s:
-                s.selected_take_id = take.id
+                s.selected_take_id = new_take.id
             session.commit()
-            take_id = take.id
+            new_take_id = new_take.id
         finally:
             session.close()
 
-        record_cost(project_id, job.id, "video", model_used, est_cost, is_demo, f"{shot.title} ({payload.engine}, {payload.duration_sec}s)")
-        return {"shot_id": shot_id, "take_id": take_id, "file_url": to_media_url(rel_vid), "is_demo": is_demo}
+        record_cost(project_id, job.id, "video", model_used, est_cost, is_demo, f"{shot.title} ({action_label}, {payload.duration_sec}s)")
+        return {"shot_id": shot_id, "take_id": new_take_id, "file_url": to_media_url(rel_vid), "is_demo": is_demo}
 
     submit_background_job(job.id, _worker)
     return _job_to_out(job)
@@ -384,8 +693,10 @@ async def import_external_take(
         file_path=rel_vid,
         thumbnail_path=rel_thumb if thumb_ok else None,
         duration_sec=dur,
+        resolution="1080p",
         has_audio=has_aud,
         prompt_used=f"Imported from external file: {file.filename}",
+        mode="flow_import",
         cost_usd=0.0,
     )
     db.add(take)
@@ -416,12 +727,12 @@ async def run_take_qa_review(
         project_id=project_id,
         shot_id=shot_id,
         kind="qa",
-        message=f"Gemini 质检导演正在审看「{shot.title}」...",
+        message=f"Gemini 4 质检导演正在审看「{shot.title}」...",
         estimated_cost_usd=est_cost,
     )
 
     def _worker(progress_cb):
-        progress_cb(40, "Gemini 多模态分析视频画面与连贯性...")
+        progress_cb(40, "Gemini 4 多模态分析视频画面与连贯性...")
         qa_data, model_used, is_demo = review_video_qa(
             vid_abs,
             shot.title,

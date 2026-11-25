@@ -1,5 +1,6 @@
 export type AppMode = "auto" | "live" | "demo";
 export type VideoEngine = "veo_lite" | "veo_fast" | "veo_standard" | "omni_flash";
+export type VideoResolution = "360p" | "720p" | "1080p" | "4k";
 
 export interface Settings {
   app_mode: AppMode;
@@ -17,9 +18,18 @@ export interface Settings {
   veo_fast_model: string;
   veo_standard_model: string;
   music_model: string;
+  max_concurrent_jobs: number;
+  video_request_timeout: number;
   monthly_budget_usd: number;
   ffmpeg_available: boolean;
+  ffprobe_available: boolean;
   ffmpeg_path: string;
+}
+
+export interface ConnectionTestResult {
+  ok: boolean;
+  message: string;
+  checked_model: string | null;
 }
 
 export interface BudgetSummary {
@@ -67,10 +77,19 @@ export interface Asset {
   id: string;
   project_id: string;
   name: string;
-  kind: "character" | "scene" | "prop" | "audio";
+  kind: "character" | "scene" | "prop" | "audio" | "video" | string;
   description: string;
   file_url: string | null;
   turnaround_url: string | null;
+  media_type: "image" | "video" | "audio" | string;
+  mime_type: string;
+  thumb_url: string | null;
+  size_bytes: number;
+  width: number | null;
+  height: number | null;
+  duration_sec: number | null;
+  fps: string | null;
+  has_audio: boolean;
   created_at: string;
 }
 
@@ -83,8 +102,12 @@ export interface Take {
   file_url: string;
   thumbnail_url: string | null;
   duration_sec: number;
+  resolution: string;
   has_audio: boolean;
   prompt_used: string;
+  interaction_id: string | null;
+  parent_take_id: string | null;
+  mode: string;
   qa_score: number | null;
   qa_feedback: string | null;
   cost_usd: number;
@@ -167,9 +190,74 @@ export interface ExportRecord {
   local_path: string;
   resolution: string;
   duration_sec: number;
+  crossfade_sec: number;
   include_bgm: boolean;
   burn_subtitles: boolean;
   created_at: string;
+}
+
+export type StudioJobMode =
+  | "text_to_video"
+  | "first_frame"
+  | "first_last_frame"
+  | "reference_to_video"
+  | "edit"
+  | "extend";
+
+export interface StudioJob {
+  id: string;
+  project_id: string;
+  mode: StudioJobMode | string;
+  status: "queued" | "uploading" | "generating" | "downloading" | "completed" | "failed";
+  progress: number;
+  progress_message: string;
+  prompt: string;
+  enhanced_prompt: string | null;
+  model: string;
+  aspect_ratio: "16:9" | "9:16" | string;
+  duration_seconds: number;
+  resolution: VideoResolution | string;
+  strip_audio: boolean;
+  task_override: string | null;
+  first_frame_asset_id: string | null;
+  last_frame_asset_id: string | null;
+  source_video_asset_id: string | null;
+  ref_image_asset_ids: string[];
+  ref_video_asset_ids: string[];
+  parent_job_id: string | null;
+  previous_interaction_id: string | null;
+  interaction_id: string | null;
+  output_url: string | null;
+  output_thumb_url: string | null;
+  output_duration_seconds: number | null;
+  output_width: number | null;
+  output_height: number | null;
+  output_has_audio: boolean;
+  output_size_bytes: number | null;
+  cost_usd: number;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+}
+
+export interface EnhancedPromptResult {
+  enhanced_prompt_en: string;
+  summary_zh: string;
+  audio_cue: string;
+  camera_notes: string;
+  tips: string[];
+}
+
+export interface StudioDraftInjection {
+  nonce: number;
+  tabMode?: "create" | "keyframes" | "edit" | "extend";
+  prompt?: string;
+  enhancedPrompt?: string;
+  firstFrameAssetId?: string | null;
+  lastFrameAssetId?: string | null;
+  sourceVideoAssetId?: string | null;
+  addRefImageAssetId?: string;
 }
 
 export const VIDEO_ENGINE_OPTIONS: Array<{
@@ -179,13 +267,20 @@ export const VIDEO_ENGINE_OPTIONS: Array<{
   channel: string;
   desc: string;
 }> = [
+  {
+    id: "omni_flash",
+    label: "Gemini Omni 1.2 Flash",
+    ratePerSec: 0.03,
+    channel: "Gemini API",
+    desc: "仅需 API Key · 支持3-15s/4K/R2V/改片续写 (~$0.03/s)",
+  },
   { id: "veo_lite", label: "Veo 3.1 Lite", ratePerSec: 0.05, channel: "Vertex AI", desc: "低成本打样首选 (~$0.05/s)" },
   { id: "veo_fast", label: "Veo 3.1 Fast", ratePerSec: 0.12, channel: "Vertex AI", desc: "质量速度均衡 (~$0.12/s)" },
   { id: "veo_standard", label: "Veo 3.1 Standard", ratePerSec: 0.4, channel: "Vertex AI", desc: "电影级精渲 (~$0.40/s)" },
-  { id: "omni_flash", label: "Gemini Omni 1.2 Flash", ratePerSec: 0.03, channel: "Gemini API", desc: "仅需 API Key (~$0.03/s)" },
 ];
 
-export function estimateVideoUsd(engine: VideoEngine, sec: number): string {
+export function estimateVideoUsd(engine: VideoEngine, sec: number, resolution: VideoResolution = "720p"): string {
   const opt = VIDEO_ENGINE_OPTIONS.find((o) => o.id === engine);
-  return ((opt?.ratePerSec ?? 0.05) * sec).toFixed(2);
+  const mult = engine === "omni_flash" && resolution === "4k" ? 1.5 : 1.0;
+  return ((opt?.ratePerSec ?? 0.05) * sec * mult).toFixed(2);
 }

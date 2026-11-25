@@ -62,6 +62,7 @@ class Project(Base):
     shots: Mapped[list["Shot"]] = relationship(back_populates="project", cascade="all, delete-orphan", order_by="Shot.order_index")
     messages: Mapped[list["ChatMessage"]] = relationship(back_populates="project", cascade="all, delete-orphan", order_by="ChatMessage.created_at")
     exports: Mapped[list["ExportRecord"]] = relationship(back_populates="project", cascade="all, delete-orphan", order_by="ExportRecord.created_at.desc()")
+    studio_jobs: Mapped[list["StudioJob"]] = relationship(back_populates="project", cascade="all, delete-orphan", order_by="StudioJob.created_at.desc()")
 
 
 class Episode(Base):
@@ -87,10 +88,21 @@ class Asset(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False)
-    kind: Mapped[str] = mapped_column(String(32), default="character")  # character | scene | prop | audio
+    kind: Mapped[str] = mapped_column(String(32), default="character")  # character | scene | prop | audio | video
     description: Mapped[str] = mapped_column(Text, default="")
     file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     turnaround_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    media_type: Mapped[str] = mapped_column(String(16), default="image")  # image | video | audio
+    mime_type: Mapped[str] = mapped_column(String(64), default="")
+    thumb_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fps: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    has_audio: Mapped[bool] = mapped_column(Boolean, default=False)
+    gemini_file_uri: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    gemini_file_expires_at: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
     project: Mapped["Project"] = relationship(back_populates="assets")
@@ -135,8 +147,12 @@ class Take(Base):
     file_path: Mapped[str] = mapped_column(String(500), nullable=False)
     thumbnail_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     duration_sec: Mapped[float] = mapped_column(Float, default=6.0)
+    resolution: Mapped[str] = mapped_column(String(16), default="720p")
     has_audio: Mapped[bool] = mapped_column(Boolean, default=True)
     prompt_used: Mapped[str] = mapped_column(Text, default="")
+    interaction_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    parent_take_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    mode: Mapped[str] = mapped_column(String(32), default="generate")  # generate | edit | extend | flow_import
     qa_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     qa_feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
@@ -198,6 +214,7 @@ class ExportRecord(Base):
     file_path: Mapped[str] = mapped_column(String(500), nullable=False)
     resolution: Mapped[str] = mapped_column(String(32), default="1080p")
     duration_sec: Mapped[float] = mapped_column(Float, default=0.0)
+    crossfade_sec: Mapped[float] = mapped_column(Float, default=0.0)
     include_bgm: Mapped[bool] = mapped_column(Boolean, default=True)
     burn_subtitles: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
@@ -205,19 +222,81 @@ class ExportRecord(Base):
     project: Mapped["Project"] = relationship(back_populates="exports")
 
 
+class StudioJob(Base):
+    __tablename__ = "studio_jobs"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="queued")
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    progress_message: Mapped[str] = mapped_column(String(300), default="")
+    prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    enhanced_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model: Mapped[str] = mapped_column(String(120), default="gemini-omni-1.2-flash")
+    aspect_ratio: Mapped[str] = mapped_column(String(16), default="16:9")
+    duration_seconds: Mapped[int] = mapped_column(Integer, default=10)
+    resolution: Mapped[str] = mapped_column(String(16), default="720p")
+    strip_audio: Mapped[bool] = mapped_column(Boolean, default=False)
+    task_override: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    first_frame_asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_frame_asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source_video_asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    ref_image_asset_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    ref_video_asset_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    parent_job_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    previous_interaction_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    interaction_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    output_file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    output_thumb_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    output_duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    output_width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_has_audio: Mapped[bool] = mapped_column(Boolean, default=True)
+    output_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    project: Mapped["Project"] = relationship(back_populates="studio_jobs")
+
+
+def _add_column_if_missing(conn, insp, table: str, column: str, ddl: str) -> None:
+    if table not in insp.get_table_names():
+        return
+    cols = {c["name"] for c in insp.get_columns(table)}
+    if column not in cols:
+        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+
+
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     # Lightweight additive migrations for existing local SQLite databases
     insp = inspect(engine)
     with engine.begin() as conn:
-        if "projects" in insp.get_table_names():
-            p_cols = {c["name"] for c in insp.get_columns("projects")}
-            if "novel_title" not in p_cols:
-                conn.execute(text("ALTER TABLE projects ADD COLUMN novel_title VARCHAR(200) DEFAULT ''"))
-        if "shots" in insp.get_table_names():
-            s_cols = {c["name"] for c in insp.get_columns("shots")}
-            if "episode_id" not in s_cols:
-                conn.execute(text("ALTER TABLE shots ADD COLUMN episode_id VARCHAR(32)"))
+        _add_column_if_missing(conn, insp, "projects", "novel_title", "VARCHAR(200) DEFAULT ''")
+        _add_column_if_missing(conn, insp, "shots", "episode_id", "VARCHAR(32)")
+
+        _add_column_if_missing(conn, insp, "assets", "media_type", "VARCHAR(16) DEFAULT 'image'")
+        _add_column_if_missing(conn, insp, "assets", "mime_type", "VARCHAR(64) DEFAULT ''")
+        _add_column_if_missing(conn, insp, "assets", "thumb_path", "VARCHAR(500)")
+        _add_column_if_missing(conn, insp, "assets", "size_bytes", "INTEGER DEFAULT 0")
+        _add_column_if_missing(conn, insp, "assets", "width", "INTEGER")
+        _add_column_if_missing(conn, insp, "assets", "height", "INTEGER")
+        _add_column_if_missing(conn, insp, "assets", "duration_sec", "FLOAT")
+        _add_column_if_missing(conn, insp, "assets", "fps", "VARCHAR(32)")
+        _add_column_if_missing(conn, insp, "assets", "has_audio", "BOOLEAN DEFAULT 0")
+        _add_column_if_missing(conn, insp, "assets", "gemini_file_uri", "VARCHAR(500)")
+        _add_column_if_missing(conn, insp, "assets", "gemini_file_expires_at", "VARCHAR(64)")
+
+        _add_column_if_missing(conn, insp, "takes", "resolution", "VARCHAR(16) DEFAULT '720p'")
+        _add_column_if_missing(conn, insp, "takes", "interaction_id", "VARCHAR(200)")
+        _add_column_if_missing(conn, insp, "takes", "parent_take_id", "VARCHAR(32)")
+        _add_column_if_missing(conn, insp, "takes", "mode", "VARCHAR(32) DEFAULT 'generate'")
+
+        _add_column_if_missing(conn, insp, "export_records", "crossfade_sec", "FLOAT DEFAULT 0.0")
 
 
 def get_db():

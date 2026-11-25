@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+import asyncio
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -8,8 +9,8 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import DATA_DIR, STATIC_WEB_DIR, load_settings
 from app.database import init_db
-from app.routers import assets, audio, chat, export, novel, projects, settings, shots, tasks
-from app.services.task_runner import mark_stale_jobs_on_startup
+from app.routers import assets, audio, chat, export, novel, projects, settings, shots, studio, tasks
+from app.services.task_runner import attach_event_loop, mark_stale_jobs_on_startup
 
 
 @asynccontextmanager
@@ -17,6 +18,7 @@ async def lifespan(_app: FastAPI):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     init_db()
     mark_stale_jobs_on_startup()
+    attach_event_loop(asyncio.get_running_loop())
     yield
 
 
@@ -47,6 +49,7 @@ app.include_router(chat.router)
 app.include_router(audio.router)
 app.include_router(tasks.router)
 app.include_router(export.router)
+app.include_router(studio.router)
 
 
 @app.get("/api/health")

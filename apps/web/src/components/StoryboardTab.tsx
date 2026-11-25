@@ -8,14 +8,18 @@ import {
   LayoutGrid,
   Link2,
   Plus,
+  Repeat,
+  Rocket,
+  Send,
   Sparkles,
   Star,
   Table as TableIcon,
   Trash2,
   Upload,
+  Wand2,
 } from "lucide-react";
 import { VIDEO_ENGINE_OPTIONS, estimateVideoUsd } from "../types";
-import type { Asset, Shot, VideoEngine } from "../types";
+import type { Asset, Shot, StudioDraftInjection, VideoEngine, VideoResolution } from "../types";
 
 interface StoryboardTabProps {
   shots: Shot[];
@@ -28,15 +32,45 @@ interface StoryboardTabProps {
   onCopyPrevEndFrame: (shotId: string) => Promise<void>;
   onGenerateVideo: (
     shotId: string,
-    payload: { engine: VideoEngine; duration_sec: number; with_audio: boolean; use_end_frame: boolean }
+    payload: {
+      engine: VideoEngine;
+      duration_sec: number;
+      resolution: VideoResolution;
+      with_audio: boolean;
+      use_end_frame: boolean;
+    }
   ) => Promise<void>;
+  onBatchGenerate: (payload: {
+    engine: VideoEngine;
+    resolution: VideoResolution;
+    with_audio: boolean;
+    use_end_frame: boolean;
+    only_pending: boolean;
+    chain_last_frame: boolean;
+  }) => Promise<void>;
+  onIterateTake: (
+    shotId: string,
+    takeId: string,
+    payload: {
+      action: "edit" | "extend";
+      prompt: string;
+      duration_sec: number;
+      resolution: VideoResolution;
+      strip_audio: boolean;
+      ref_asset_ids: string[];
+    }
+  ) => Promise<void>;
+  onEnhanceShotPrompt: (shot: Shot) => Promise<void>;
   onImportTake: (shotId: string, file: File) => Promise<void>;
   onRunQa: (shotId: string, takeId: string) => Promise<void>;
+  onSendToStudio: (draft: Omit<StudioDraftInjection, "nonce">) => void;
   onToast: (msg: string) => void;
 }
 
 const SHOT_TYPES = ["远景", "全景", "中景", "中近景", "近景", "特写"];
 const CAMERA_MOVES = ["缓慢推进", "缓慢拉远", "横摇", "侧面跟拍", "俯拍航拍", "环绕运镜", "固定机位"];
+const OMNI_DURATIONS = [3, 4, 5, 6, 8, 10, 12, 15];
+const VEO_DURATIONS = [4, 6, 8];
 
 export const StoryboardTab: React.FC<StoryboardTabProps> = ({
   shots,
@@ -48,14 +82,32 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
   onGenerateKeyframe,
   onCopyPrevEndFrame,
   onGenerateVideo,
+  onBatchGenerate,
+  onIterateTake,
+  onEnhanceShotPrompt,
   onImportTake,
   onRunQa,
+  onSendToStudio,
   onToast,
 }) => {
   const [viewMode, setViewMode] = useState<"cards" | "table">("cards");
-  const [engine, setEngine] = useState<VideoEngine>("veo_lite");
+  const [engine, setEngine] = useState<VideoEngine>("omni_flash");
+  const [resolution, setResolution] = useState<VideoResolution>("720p");
   const [withAudio, setWithAudio] = useState(true);
   const [useEndFrame, setUseEndFrame] = useState(false);
+  const [chainLastFrame, setChainLastFrame] = useState(true);
+  const [enhancingShotId, setEnhancingShotId] = useState<string | null>(null);
+
+  // Per-take inline Edit/Extend panel state
+  const [iteratePanel, setIteratePanel] = useState<{
+    shotId: string;
+    takeId: string;
+    action: "edit" | "extend";
+    prompt: string;
+    duration_sec: number;
+    strip_audio: boolean;
+    ref_asset_ids: string[];
+  } | null>(null);
 
   const toggleAssetLink = (shot: Shot, assetId: string) => {
     const exists = shot.asset_ids.includes(assetId);
@@ -79,20 +131,57 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
   };
 
   const handleGenerateVideoWithConfirm = (shot: Shot) => {
-    const est = estimateVideoUsd(engine, shot.duration_sec);
+    const est = estimateVideoUsd(engine, shot.duration_sec, resolution);
     if (effectiveMode === "live") {
       const ok = confirm(
-        `确认调用 ${engine} 生成「${shot.title}」(${shot.duration_sec}s)？\n预估消耗约 $${est} USD（将从你的 Google 开发者额度抵扣）。`
+        `确认调用 ${engine} (${resolution}) 生成「${shot.title}」(${shot.duration_sec}s)？\n预估消耗约 $${est} USD（将从你的 Google 开发者额度抵扣）。`
       );
       if (!ok) return;
     }
     onGenerateVideo(shot.id, {
       engine,
       duration_sec: shot.duration_sec,
+      resolution,
       with_audio: withAudio,
       use_end_frame: useEndFrame && Boolean(shot.end_frame_url),
     });
   };
+
+  const handleBatchShoot = () => {
+    const pendingShots = shots.filter((s) => s.takes.length === 0);
+    if (pendingShots.length === 0) {
+      onToast("当前分镜均已有视频 Take（如需重拍请点击单镜生成或删除旧 Take）。");
+      return;
+    }
+    const estTotal = pendingShots
+      .reduce((acc, s) => acc + Number(estimateVideoUsd(engine, s.duration_sec, resolution)), 0)
+      .toFixed(2);
+    if (effectiveMode === "live") {
+      const ok = confirm(
+        `确认批量拍摄 ${pendingShots.length} 个待拍镜头（${chainLastFrame ? "尾帧自动接力顺序拍" : "高速并行拍"} · ${engine} ${resolution}）？\n预估总消耗约 $${estTotal} USD。`
+      );
+      if (!ok) return;
+    }
+    onBatchGenerate({
+      engine,
+      resolution,
+      with_audio: withAudio,
+      use_end_frame: useEndFrame,
+      only_pending: true,
+      chain_last_frame: chainLastFrame,
+    });
+  };
+
+  const handleEnhancePrompt = async (shot: Shot) => {
+    setEnhancingShotId(shot.id);
+    try {
+      await onEnhanceShotPrompt(shot);
+    } finally {
+      setEnhancingShotId(null);
+    }
+  };
+
+  const durationChoices = engine === "omni_flash" ? OMNI_DURATIONS : VEO_DURATIONS;
 
   return (
     <div className="space-y-4 p-5">
@@ -117,6 +206,30 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
           <button className="studio-btn-primary" onClick={onCreateShot}>
             <Plus className="h-3.5 w-3.5" /> 新增镜头
           </button>
+
+          {shots.length > 0 && (
+            <div className="flex items-center gap-2 rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-2.5 py-1">
+              <label
+                className="flex cursor-pointer items-center gap-1.5 text-[11px] text-indigo-200"
+                title="开启后按顺序自动抽取上一镜尾帧作为下一镜首帧，保证动作连贯"
+              >
+                <input
+                  type="checkbox"
+                  checked={chainLastFrame}
+                  onChange={(e) => setChainLastFrame(e.target.checked)}
+                  className="rounded border-studio-border bg-studio-bg text-indigo-500"
+                />
+                尾帧接力
+              </label>
+              <button
+                className="studio-btn-primary py-1 text-[11px]"
+                onClick={handleBatchShoot}
+              >
+                <Rocket className="h-3 w-3" />
+                一键批量拍片
+              </button>
+            </div>
+          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-3 text-xs">
@@ -134,6 +247,22 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
               ))}
             </select>
           </div>
+
+          {engine === "omni_flash" && (
+            <div className="flex items-center gap-1.5">
+              <span className="text-slate-400">清晰度:</span>
+              <select
+                className="rounded-lg border border-studio-border bg-studio-bg px-2 py-1 text-xs text-slate-100"
+                value={resolution}
+                onChange={(e) => setResolution(e.target.value as VideoResolution)}
+              >
+                <option value="360p">360p</option>
+                <option value="720p">720p</option>
+                <option value="1080p">1080p</option>
+                <option value="4k">4K</option>
+              </select>
+            </div>
+          )}
 
           <label className="flex cursor-pointer items-center gap-1.5 text-slate-300">
             <input
@@ -213,7 +342,7 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
                         className="studio-btn-primary py-1 text-[11px]"
                         onClick={() => handleGenerateVideoWithConfirm(shot)}
                       >
-                        出视频 (${estimateVideoUsd(engine, shot.duration_sec)})
+                        出视频 (${estimateVideoUsd(engine, shot.duration_sec, resolution)})
                       </button>
                     </div>
                   </td>
@@ -227,6 +356,8 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
           {shots.map((shot, idx) => {
             const selectedTake =
               shot.takes.find((t) => t.id === shot.selected_take_id) || shot.takes[0] || null;
+            const isIterOpen = iteratePanel && iteratePanel.shotId === shot.id && selectedTake?.id === iteratePanel.takeId;
+
             return (
               <div
                 key={shot.id}
@@ -272,13 +403,33 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
                       value={shot.duration_sec}
                       onChange={(e) => onUpdateShot(shot.id, { duration_sec: Number(e.target.value) })}
                     >
-                      <option value={4}>4s</option>
-                      <option value={6}>6s</option>
-                      <option value={8}>8s</option>
+                      {!durationChoices.includes(shot.duration_sec) && (
+                        <option value={shot.duration_sec}>{shot.duration_sec}s</option>
+                      )}
+                      {durationChoices.map((sec) => (
+                        <option key={sec} value={sec}>
+                          {sec}s
+                        </option>
+                      ))}
                     </select>
                   </div>
 
                   <div className="flex items-center gap-1.5">
+                    <button
+                      className="studio-btn-secondary text-[11px]"
+                      onClick={() =>
+                        onSendToStudio({
+                          tabMode: "create",
+                          prompt: shot.visual_prompt_zh || shot.video_prompt_en,
+                          enhancedPrompt: shot.video_prompt_en,
+                          addRefImageAssetId: shot.asset_ids[0],
+                        })
+                      }
+                      title="发送本镜头提示词与参考资产到「全模态自由创作台」精修"
+                    >
+                      <Send className="h-3.5 w-3.5 text-indigo-400" />
+                      去自由创作台
+                    </button>
                     <button
                       className="studio-btn-secondary text-[11px]"
                       onClick={() => handleCopyFlowPack(shot)}
@@ -346,6 +497,7 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
                         rows={2}
                         className="studio-input text-xs"
                         defaultValue={shot.visual_prompt_zh}
+                        key={shot.id + "_zh_" + shot.visual_prompt_zh}
                         onBlur={(e) => {
                           if (e.target.value !== shot.visual_prompt_zh) {
                             onUpdateShot(shot.id, { visual_prompt_zh: e.target.value });
@@ -355,13 +507,25 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
                     </div>
 
                     <div>
-                      <label className="mb-1 block text-[11px] text-slate-400">
-                        电影级英文提示词（用于 Nano Banana / Veo 3.1 / Google Flow）
-                      </label>
+                      <div className="mb-1 flex items-center justify-between">
+                        <label className="text-[11px] text-slate-400">
+                          电影级英文提示词（用于 Nano Banana 2.1 / Omni 1.2 / Veo 3.1 / Flow）
+                        </label>
+                        <button
+                          type="button"
+                          disabled={enhancingShotId === shot.id}
+                          onClick={() => handleEnhancePrompt(shot)}
+                          className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] text-indigo-300 hover:bg-indigo-500/15"
+                        >
+                          <Wand2 className="h-3 w-3" />
+                          {enhancingShotId === shot.id ? "Gemini 4 扩写中..." : "AI 扩写"}
+                        </button>
+                      </div>
                       <textarea
                         rows={2}
                         className="studio-input font-mono text-[11px]"
                         defaultValue={shot.video_prompt_en}
+                        key={shot.id + "_en_" + shot.video_prompt_en}
                         onBlur={(e) => {
                           if (e.target.value !== shot.video_prompt_en) {
                             onUpdateShot(shot.id, { video_prompt_en: e.target.value });
@@ -487,7 +651,8 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
                                     }`}
                                   >
                                     {isSel && <CheckCircle2 className="h-3 w-3" />}
-                                    Take {shot.takes.length - tIdx} ({t.engine})
+                                    Take {shot.takes.length - tIdx} ({t.engine}
+                                    {t.mode && t.mode !== "generate" ? `·${t.mode}` : ""})
                                     {t.qa_score !== null && (
                                       <span className="ml-0.5 text-amber-300">★{t.qa_score}</span>
                                     )}
@@ -496,14 +661,143 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
                               })}
                             </div>
 
-                            <button
-                              className="studio-btn-secondary py-1 text-[11px]"
-                              onClick={() => onRunQa(shot.id, selectedTake.id)}
-                            >
-                              <Eye className="h-3 w-3 text-amber-400" />
-                              Gemini 审片
-                            </button>
+                            <div className="flex flex-wrap items-center gap-1">
+                              <button
+                                className="studio-btn-secondary py-1 text-[11px]"
+                                onClick={() =>
+                                  setIteratePanel(
+                                    isIterOpen && iteratePanel?.action === "edit"
+                                      ? null
+                                      : {
+                                          shotId: shot.id,
+                                          takeId: selectedTake.id,
+                                          action: "edit",
+                                          prompt: "Make lighting more dramatic, keep everything else the same.",
+                                          duration_sec: Math.min(15, Math.max(3, Math.round(selectedTake.duration_sec || 6))),
+                                          strip_audio: false,
+                                          ref_asset_ids: [],
+                                        }
+                                  )
+                                }
+                              >
+                                <Wand2 className="h-3 w-3 text-indigo-400" />
+                                多轮改片
+                              </button>
+                              <button
+                                className="studio-btn-secondary py-1 text-[11px]"
+                                onClick={() =>
+                                  setIteratePanel(
+                                    isIterOpen && iteratePanel?.action === "extend"
+                                      ? null
+                                      : {
+                                          shotId: shot.id,
+                                          takeId: selectedTake.id,
+                                          action: "extend",
+                                          prompt: "Extend this video seamlessly as the camera pushes forward.",
+                                          duration_sec: 6,
+                                          strip_audio: false,
+                                          ref_asset_ids: [],
+                                        }
+                                  )
+                                }
+                              >
+                                <Repeat className="h-3 w-3 text-cyan-400" />
+                                续写
+                              </button>
+                              <button
+                                className="studio-btn-secondary py-1 text-[11px]"
+                                onClick={() => onRunQa(shot.id, selectedTake.id)}
+                              >
+                                <Eye className="h-3 w-3 text-amber-400" />
+                                Gemini 4 审片
+                              </button>
+                            </div>
                           </div>
+
+                          {/* Inline Edit / Extend Panel */}
+                          {isIterOpen && iteratePanel && (
+                            <div className="space-y-2 rounded-lg border border-indigo-500/35 bg-studio-card p-2.5 text-xs">
+                              <div className="flex items-center justify-between">
+                                <span className="font-semibold text-indigo-300">
+                                  Omni 1.2 Flash · {iteratePanel.action === "extend" ? "视频续写 (3–10s)" : "自然语言改片"}
+                                  {selectedTake.interaction_id ? "（支持无损状态迭代）" : "（自动上传视频源改片）"}
+                                </span>
+                                <button
+                                  className="text-[11px] text-slate-400 hover:text-white"
+                                  onClick={() => setIteratePanel(null)}
+                                >
+                                  收起
+                                </button>
+                              </div>
+                              <textarea
+                                rows={2}
+                                className="studio-input text-xs"
+                                value={iteratePanel.prompt}
+                                onChange={(e) =>
+                                  setIteratePanel({ ...iteratePanel, prompt: e.target.value })
+                                }
+                                placeholder={
+                                  iteratePanel.action === "extend"
+                                    ? "输入续写剧情（例如：Extend this video: the character turns and walks toward the neon doorway.）"
+                                    : "输入修改指令（例如：Change lighting to golden sunset, keep everything else the same.）"
+                                }
+                              />
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-300">
+                                  <label className="flex items-center gap-1">
+                                    时长:
+                                    <select
+                                      className="rounded border border-studio-border bg-studio-bg px-1.5 py-0.5"
+                                      value={iteratePanel.duration_sec}
+                                      onChange={(e) =>
+                                        setIteratePanel({
+                                          ...iteratePanel,
+                                          duration_sec: Number(e.target.value),
+                                        })
+                                      }
+                                    >
+                                      {(iteratePanel.action === "extend" ? [4, 6, 8, 10] : [4, 6, 8, 10, 12, 15]).map(
+                                        (sec) => (
+                                          <option key={sec} value={sec}>
+                                            {sec}s
+                                          </option>
+                                        )
+                                      )}
+                                    </select>
+                                  </label>
+                                  <label className="flex cursor-pointer items-center gap-1">
+                                    <input
+                                      type="checkbox"
+                                      checked={iteratePanel.strip_audio}
+                                      onChange={(e) =>
+                                        setIteratePanel({
+                                          ...iteratePanel,
+                                          strip_audio: e.target.checked,
+                                        })
+                                      }
+                                    />
+                                    剥离原声重配
+                                  </label>
+                                </div>
+                                <button
+                                  className="studio-btn-primary py-1 text-[11px]"
+                                  onClick={async () => {
+                                    await onIterateTake(shot.id, selectedTake.id, {
+                                      action: iteratePanel.action,
+                                      prompt: iteratePanel.prompt,
+                                      duration_sec: iteratePanel.duration_sec,
+                                      resolution,
+                                      strip_audio: iteratePanel.strip_audio,
+                                      ref_asset_ids: iteratePanel.ref_asset_ids,
+                                    });
+                                    setIteratePanel(null);
+                                  }}
+                                >
+                                  提交{iteratePanel.action === "extend" ? "续写" : "改片"}
+                                </button>
+                              </div>
+                            </div>
+                          )}
 
                           {selectedTake.qa_feedback && (
                             <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2 text-[11px] leading-relaxed text-amber-200">
@@ -518,20 +812,21 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
                       ) : (
                         <div className="flex h-28 flex-col items-center justify-center gap-1 text-xs text-slate-500">
                           <Film className="h-6 w-6" />
-                          <span>尚无视频 Take（建议先合成首帧，再用 Veo Lite 打样或从 Flow 导入）</span>
+                          <span>尚无视频 Take（建议先合成首帧，再用 Omni 1.2 / Veo / Flow 生成）</span>
                         </div>
                       )}
 
                       <div className="mt-2.5 flex items-center justify-between gap-2">
                         <span className="text-[11px] text-slate-400">
                           当前引擎: <strong className="text-slate-200">{engine}</strong>
+                          {engine === "omni_flash" && ` · ${resolution}`}
                         </span>
                         <button
                           className="studio-btn-primary"
                           onClick={() => handleGenerateVideoWithConfirm(shot)}
                         >
                           <Film className="h-3.5 w-3.5" />
-                          生成视频 ({shot.duration_sec}s · ~${estimateVideoUsd(engine, shot.duration_sec)})
+                          生成视频 ({shot.duration_sec}s · ~${estimateVideoUsd(engine, shot.duration_sec, resolution)})
                         </button>
                       </div>
                     </div>

@@ -15,6 +15,8 @@ def ensure_project_dirs(project_id: str) -> dict[str, Path]:
         "takes": base / "takes",
         "audio": base / "audio",
         "exports": base / "exports",
+        "studio": base / "studio",
+        "thumbs": base / "thumbs",
     }
     for p in dirs.values():
         p.mkdir(parents=True, exist_ok=True)

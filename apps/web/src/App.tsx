@@ -1,11 +1,12 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, BookOpen, Film, Layers, Scissors } from "lucide-react";
+import { AlertCircle, BookOpen, Film, Layers, Scissors, Sparkles } from "lucide-react";
 import { api } from "./api";
 import { AssetHub } from "./components/AssetHub";
 import { DirectorChat } from "./components/DirectorChat";
 import { NovelTab } from "./components/NovelTab";
 import { SettingsModal } from "./components/SettingsModal";
 import { StoryboardTab } from "./components/StoryboardTab";
+import { StudioTab } from "./components/StudioTab";
 import { TimelineTab } from "./components/TimelineTab";
 import { TopBar } from "./components/TopBar";
 import type {
@@ -18,9 +19,11 @@ import type {
   Project,
   Settings,
   Shot,
+  StudioDraftInjection,
+  StudioJob,
 } from "./types";
 
-type ActiveTab = "novel" | "assets" | "storyboard" | "timeline";
+type ActiveTab = "novel" | "assets" | "storyboard" | "timeline" | "studio";
 
 export default function App() {
   const [settings, setSettings] = useState<Settings | null>(null);
@@ -35,6 +38,8 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [tasks, setTasks] = useState<JobTask[]>([]);
   const [exportsList, setExportsList] = useState<ExportRecord[]>([]);
+  const [studioJobs, setStudioJobs] = useState<StudioJob[]>([]);
+  const [draftInjection, setDraftInjection] = useState<StudioDraftInjection | null>(null);
 
   const [activeTab, setActiveTab] = useState<ActiveTab>("storyboard");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -70,13 +75,14 @@ export default function App() {
   }, []);
 
   const refreshProjectData = useCallback(async (pid: string) => {
-    const [a, ep, sh, ch, tk, ex, b, ps] = await Promise.all([
+    const [a, ep, sh, ch, tk, ex, sj, b, ps] = await Promise.all([
       api.listAssets(pid),
       api.listEpisodes(pid),
       api.listShots(pid),
       api.listChat(pid),
       api.listTasks(pid),
       api.listExports(pid),
+      api.listStudioJobs(pid),
       api.getBudget(),
       api.listProjects(),
     ]);
@@ -86,6 +92,7 @@ export default function App() {
     setMessages(ch);
     setTasks(tk);
     setExportsList(ex);
+    setStudioJobs(sj);
     setBudget(b);
     setProjects(ps);
   }, []);
@@ -95,7 +102,6 @@ export default function App() {
     return shots.filter((s) => s.episode_id === selectedEpisodeFilter);
   }, [shots, selectedEpisodeFilter]);
 
-  // Initial bootstrap: create a starter project automatically on first launch
   useEffect(() => {
     (async () => {
       try {
@@ -123,7 +129,51 @@ export default function App() {
     }
   }, [currentProjectId, refreshProjectData, showToast]);
 
-  // Poll active background tasks automatically & reload project when jobs finish
+  // Live SSE stream for instant Task & StudioJob updates
+  useEffect(() => {
+    if (!currentProjectId) return;
+    const es = new EventSource("/api/tasks/events");
+    es.onmessage = (evt) => {
+      try {
+        const msg = JSON.parse(evt.data);
+        if (msg.type === "task_update" && msg.data?.id) {
+          const updated = msg.data as JobTask;
+          if (updated.project_id !== currentProjectId) return;
+          setTasks((prev) => {
+            const exists = prev.some((x) => x.id === updated.id);
+            return exists ? prev.map((x) => (x.id === updated.id ? updated : x)) : [updated, ...prev];
+          });
+          if (updated.status === "completed") {
+            showToast("后台生成任务已完成！");
+            refreshProjectData(currentProjectId).catch(() => {});
+          } else if (updated.status === "failed") {
+            showToast(`任务失败：${updated.error || "未知错误"}`, "error");
+            refreshProjectData(currentProjectId).catch(() => {});
+          }
+        } else if (msg.type === "studio_job_update" && msg.data?.id) {
+          const updated = msg.data as StudioJob;
+          if (updated.project_id !== currentProjectId) return;
+          setStudioJobs((prev) => {
+            const exists = prev.some((x) => x.id === updated.id);
+            return exists ? prev.map((x) => (x.id === updated.id ? updated : x)) : [updated, ...prev];
+          });
+          if (updated.status === "completed") {
+            showToast(`Omni 创作完成（${updated.resolution.toUpperCase()}）`);
+            api.getBudget().then(setBudget).catch(() => {});
+          } else if (updated.status === "failed") {
+            showToast(updated.error_message || "Omni 创作任务失败", "error");
+          }
+        }
+      } catch {
+        // ignore keepalive / non-json
+      }
+    };
+    return () => {
+      es.close();
+    };
+  }, [currentProjectId, refreshProjectData, showToast]);
+
+  // Fallback polling while background tasks are active
   const prevActiveCountRef = useRef(0);
   useEffect(() => {
     if (!currentProjectId || activeJobs.length === 0) {
@@ -137,22 +187,14 @@ export default function App() {
         setTasks(latest);
         const stillRunning = latest.filter((t) => t.status === "queued" || t.status === "running");
         if (stillRunning.length < prevActiveCountRef.current) {
-          const failed = latest.find(
-            (t) => t.status === "failed" && activeJobs.some((old) => old.id === t.id)
-          );
-          if (failed?.error) {
-            showToast(`任务失败：${failed.error}`, "error");
-          } else {
-            showToast("后台生成任务已完成！");
-          }
           await refreshProjectData(currentProjectId);
         }
       } catch {
         // ignore transient poll errors
       }
-    }, 1500);
+    }, 2500);
     return () => clearInterval(timer);
-  }, [currentProjectId, activeJobs, refreshProjectData, showToast]);
+  }, [currentProjectId, activeJobs, refreshProjectData]);
 
   const wrap = async (fn: () => Promise<void>) => {
     try {
@@ -161,6 +203,11 @@ export default function App() {
       showToast((err as Error).message, "error");
     }
   };
+
+  const handleSendToStudio = useCallback((draft: Omit<StudioDraftInjection, "nonce">) => {
+    setDraftInjection({ ...draft, nonce: Date.now() });
+    setActiveTab("studio");
+  }, []);
 
   return (
     <div className="flex h-screen flex-col overflow-hidden bg-studio-bg text-slate-100">
@@ -231,10 +278,10 @@ export default function App() {
             }
           />
 
-          {/* Right Workspace: 4 Focused Tabs */}
+          {/* Right Workspace: 5 Focused Tabs */}
           <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-studio-border bg-studio-panel/60 px-5">
-              <div className="flex gap-1">
+              <div className="flex flex-wrap gap-1">
                 <button
                   onClick={() => setActiveTab("novel")}
                   className={`flex items-center gap-2 border-b-2 px-4 py-3 text-xs font-medium transition ${
@@ -278,6 +325,17 @@ export default function App() {
                 >
                   <Scissors className="h-3.5 w-3.5" />
                   3. 多轨时间线与导出 ({exportsList.length})
+                </button>
+                <button
+                  onClick={() => setActiveTab("studio")}
+                  className={`flex items-center gap-2 border-b-2 px-4 py-3 text-xs font-medium transition ${
+                    activeTab === "studio"
+                      ? "border-indigo-500 text-white"
+                      : "border-transparent text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  <Sparkles className="h-3.5 w-3.5 text-cyan-300" />
+                  4. 全模态自由创作 / V2V ({studioJobs.length})
                 </button>
               </div>
 
@@ -375,6 +433,15 @@ export default function App() {
                       await refreshProjectData(currentProject.id);
                     })
                   }
+                  onUploadMediaFiles={(files) =>
+                    wrap(async () => {
+                      for (const file of Array.from(files)) {
+                        await api.uploadMediaAsset(currentProject.id, file);
+                      }
+                      await refreshProjectData(currentProject.id);
+                      showToast(`已上传 ${files.length} 个媒体素材`);
+                    })
+                  }
                   onUpdateAsset={(id, patch) =>
                     wrap(async () => {
                       await api.updateAsset(currentProject.id, id, patch);
@@ -391,7 +458,21 @@ export default function App() {
                     wrap(async () => {
                       await api.uploadAssetFile(currentProject.id, id, file);
                       await refreshProjectData(currentProject.id);
-                      showToast("参考图已上传");
+                      showToast("参考文件已上传");
+                    })
+                  }
+                  onPrepAsset={(id, payload) =>
+                    wrap(async () => {
+                      const created = await api.prepAsset(currentProject.id, id, payload);
+                      await refreshProjectData(currentProject.id);
+                      showToast(`FFmpeg 预处理完成：${created.name}`);
+                    })
+                  }
+                  onExtractFrame={(id, position) =>
+                    wrap(async () => {
+                      const created = await api.extractAssetFrame(currentProject.id, id, position);
+                      await refreshProjectData(currentProject.id);
+                      showToast(`已抽取关键帧存入资产库：${created.name}`);
                     })
                   }
                   onGenerateImage={(id) =>
@@ -406,6 +487,7 @@ export default function App() {
                       setTasks((prev) => [job, ...prev]);
                     })
                   }
+                  onSendToStudio={handleSendToStudio}
                 />
               )}
 
@@ -454,6 +536,50 @@ export default function App() {
                       setTasks((prev) => [job, ...prev]);
                     })
                   }
+                  onBatchGenerate={(payload) =>
+                    wrap(async () => {
+                      const res = await api.batchGenerateShots(currentProject.id, {
+                        ...payload,
+                        episode_id: selectedEpisodeFilter === "all" ? null : selectedEpisodeFilter,
+                      });
+                      if (res.tasks.length > 0) {
+                        setTasks((prev) => [...res.tasks, ...prev]);
+                      }
+                      showToast(
+                        payload.chain_last_frame
+                          ? "已启动尾帧接力批量拍片（依次拍片并自动传递尾帧）"
+                          : `已提交 ${res.submitted_count} 个并行拍片任务`
+                      );
+                    })
+                  }
+                  onIterateTake={(sid, tid, payload) =>
+                    wrap(async () => {
+                      const job = await api.iterateTake(currentProject.id, sid, tid, payload);
+                      setTasks((prev) => [job, ...prev]);
+                      showToast(`已提交 Omni ${payload.action === "extend" ? "续写" : "多轮改片"}任务`);
+                    })
+                  }
+                  onEnhanceShotPrompt={(shot) =>
+                    wrap(async () => {
+                      const enhanced = await api.enhancePrompt(currentProject.id, {
+                        prompt: shot.visual_prompt_zh || shot.video_prompt_en || shot.title,
+                        mode: shot.start_frame_url ? "first_frame" : "text_to_video",
+                        duration_seconds: Math.max(3, Math.min(15, shot.duration_sec || 6)),
+                        aspect_ratio: currentProject.aspect_ratio === "9:16" ? "9:16" : "16:9",
+                        single_scene: true,
+                        style_hint: currentProject.style_prompt,
+                        audio_preference: shot.sfx_prompt || undefined,
+                        has_first_frame: Boolean(shot.start_frame_url),
+                        has_last_frame: Boolean(shot.end_frame_url),
+                        ref_image_count: shot.asset_ids.length,
+                      });
+                      await api.updateShot(currentProject.id, shot.id, {
+                        video_prompt_en: enhanced.enhanced_prompt_en,
+                      });
+                      await refreshProjectData(currentProject.id);
+                      showToast("Gemini 4 已完成该镜英文提示词扩写并保存！");
+                    })
+                  }
                   onImportTake={(sid, file) =>
                     wrap(async () => {
                       await api.importTake(currentProject.id, sid, file);
@@ -467,6 +593,7 @@ export default function App() {
                       setTasks((prev) => [job, ...prev]);
                     })
                   }
+                  onSendToStudio={handleSendToStudio}
                   onToast={(msg) => showToast(msg)}
                 />
               )}
@@ -520,6 +647,25 @@ export default function App() {
                       setTasks((prev) => [job, ...prev]);
                     })
                   }
+                />
+              )}
+
+              {activeTab === "studio" && (
+                <StudioTab
+                  project={currentProject}
+                  assets={assets}
+                  shots={filteredShots}
+                  studioJobs={studioJobs}
+                  settings={settings}
+                  draftInjection={draftInjection}
+                  onRefreshAssets={() => refreshProjectData(currentProject.id)}
+                  onRefreshStudioJobs={() => refreshProjectData(currentProject.id)}
+                  onRefreshShots={() => refreshProjectData(currentProject.id)}
+                  onStudioJobCreated={(job) =>
+                    setStudioJobs((prev) => [job, ...prev.filter((x) => x.id !== job.id)])
+                  }
+                  onOpenSettings={() => setSettingsOpen(true)}
+                  onToast={showToast}
                 />
               )}
             </div>

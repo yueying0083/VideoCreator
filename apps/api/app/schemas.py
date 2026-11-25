@@ -21,8 +21,11 @@ class SettingsOut(BaseModel):
     veo_fast_model: str
     veo_standard_model: str
     music_model: str
+    max_concurrent_jobs: int
+    video_request_timeout: int
     monthly_budget_usd: float
     ffmpeg_available: bool
+    ffprobe_available: bool
     ffmpeg_path: str
 
 
@@ -39,7 +42,19 @@ class SettingsUpdate(BaseModel):
     veo_fast_model: str | None = None
     veo_standard_model: str | None = None
     music_model: str | None = None
+    max_concurrent_jobs: int | None = Field(default=None, ge=1, le=6)
+    video_request_timeout: int | None = Field(default=None, ge=120, le=1800)
     monthly_budget_usd: float | None = None
+
+
+class ConnectionTestRequest(BaseModel):
+    gemini_api_key: str | None = None
+
+
+class ConnectionTestResponse(BaseModel):
+    ok: bool
+    message: str
+    checked_model: str | None = None
 
 
 class BudgetSummary(BaseModel):
@@ -125,18 +140,30 @@ class EpisodeBreakdownRequest(BaseModel):
 
 class AssetCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    kind: Literal["character", "scene", "prop", "audio"] = "character"
+    kind: Literal["character", "scene", "prop", "audio", "video"] = "character"
     description: str = ""
 
 
 class AssetUpdate(BaseModel):
     name: str | None = None
-    kind: Literal["character", "scene", "prop", "audio"] | None = None
+    kind: Literal["character", "scene", "prop", "audio", "video"] | None = None
     description: str | None = None
 
 
 class AssetGenerateRequest(BaseModel):
     prompt_override: str | None = None
+
+
+class PrepAssetRequest(BaseModel):
+    start_seconds: float = Field(default=0.0, ge=0.0)
+    duration: int = Field(default=10, ge=1, le=15)
+    strip_audio: bool = False
+    max_edge: int = Field(default=1280, ge=360, le=3840)
+
+
+class ExtractFrameRequest(BaseModel):
+    position: Literal["first", "last", "custom"] = "last"
+    timestamp_seconds: float | None = Field(default=None, ge=0.0)
 
 
 class AssetOut(BaseModel):
@@ -147,6 +174,15 @@ class AssetOut(BaseModel):
     description: str
     file_url: str | None = None
     turnaround_url: str | None = None
+    media_type: str = "image"
+    mime_type: str = ""
+    thumb_url: str | None = None
+    size_bytes: int = 0
+    width: int | None = None
+    height: int | None = None
+    duration_sec: float | None = None
+    fps: str | None = None
+    has_audio: bool = False
     created_at: datetime
 
 
@@ -159,8 +195,12 @@ class TakeOut(BaseModel):
     file_url: str
     thumbnail_url: str | None = None
     duration_sec: float
+    resolution: str = "720p"
     has_audio: bool
     prompt_used: str
+    interaction_id: str | None = None
+    parent_take_id: str | None = None
+    mode: str = "generate"
     qa_score: int | None = None
     qa_feedback: str | None = None
     cost_usd: float
@@ -229,10 +269,135 @@ class KeyframeGenerateRequest(BaseModel):
 
 class VideoGenerateRequest(BaseModel):
     engine: Literal["veo_lite", "veo_fast", "veo_standard", "omni_flash"] = "veo_lite"
-    duration_sec: int = 6
+    duration_sec: int = Field(default=6, ge=1, le=15)
+    resolution: Literal["360p", "720p", "1080p", "4k"] = "720p"
     with_audio: bool = True
     use_end_frame: bool = False
     prompt_override_en: str | None = None
+
+
+class BatchGenerateShotsRequest(BaseModel):
+    episode_id: str | None = None
+    engine: Literal["veo_lite", "veo_fast", "veo_standard", "omni_flash"] = "omni_flash"
+    resolution: Literal["360p", "720p", "1080p", "4k"] = "720p"
+    with_audio: bool = True
+    use_end_frame: bool = False
+    only_pending: bool = True
+    chain_last_frame: bool = False
+
+
+class IterateTakeRequest(BaseModel):
+    action: Literal["edit", "extend"] = "edit"
+    prompt: str = Field(..., min_length=1, max_length=4000)
+    duration_sec: int = Field(default=6, ge=3, le=15)
+    resolution: Literal["360p", "720p", "1080p", "4k"] = "720p"
+    strip_audio: bool = False
+    ref_asset_ids: list[str] = Field(default_factory=list)
+
+
+class EnhancePromptRequest(BaseModel):
+    prompt: str = Field(..., min_length=1, max_length=3000)
+    mode: str = "text_to_video"
+    duration_seconds: int = Field(default=10, ge=3, le=15)
+    aspect_ratio: Literal["16:9", "9:16"] = "16:9"
+    single_scene: bool = False
+    include_timecodes: bool = False
+    audio_preference: str | None = None
+    style_hint: str | None = None
+    has_first_frame: bool = False
+    has_last_frame: bool = False
+    ref_image_count: int = 0
+    ref_video_count: int = 0
+    model: str | None = None
+
+
+class EnhancedPromptOutput(BaseModel):
+    """Structured output returned by Gemini 4 for Omni Flash prompt optimization."""
+
+    enhanced_prompt_en: str = Field(
+        description=(
+            "Production-ready English prompt optimized specifically for Gemini Omni 1.2 Flash. "
+            "Includes visual detail, camera movement, lighting, pacing, and sound design."
+        )
+    )
+    summary_zh: str = Field(
+        description="Concise Chinese explanation of what the enhanced prompt will produce."
+    )
+    audio_cue: str = Field(
+        description="Summary of the soundscape, music, dialogue, or ambient audio cue included."
+    )
+    camera_notes: str = Field(
+        description="Brief camera & composition breakdown (lens, movement, framing)."
+    )
+    tips: list[str] = Field(
+        default_factory=list,
+        description="1 to 3 practical creative tips in Chinese for iterating on this shot.",
+    )
+
+
+StudioJobMode = Literal[
+    "text_to_video",
+    "first_frame",
+    "first_last_frame",
+    "reference_to_video",
+    "edit",
+    "extend",
+]
+
+
+class StudioJobCreateRequest(BaseModel):
+    mode: StudioJobMode = "text_to_video"
+    prompt: str = Field(..., min_length=1, max_length=4000)
+    enhanced_prompt: str | None = None
+    aspect_ratio: Literal["16:9", "9:16"] = "16:9"
+    duration_seconds: int = Field(default=10, ge=3, le=15)
+    resolution: Literal["360p", "720p", "1080p", "4k"] = "720p"
+    strip_audio: bool = False
+    task_override: Literal["text_to_video", "image_to_video", "reference_to_video", "edit", "extend"] | None = None
+    first_frame_asset_id: str | None = None
+    last_frame_asset_id: str | None = None
+    source_video_asset_id: str | None = None
+    ref_image_asset_ids: list[str] = Field(default_factory=list)
+    ref_video_asset_ids: list[str] = Field(default_factory=list)
+    parent_job_id: str | None = None
+    previous_interaction_id: str | None = None
+
+
+class StudioJobOut(BaseModel):
+    id: str
+    project_id: str
+    mode: str
+    status: str
+    progress: int = 0
+    progress_message: str = ""
+    prompt: str
+    enhanced_prompt: str | None = None
+    model: str
+    aspect_ratio: str
+    duration_seconds: int
+    resolution: str
+    strip_audio: bool = False
+    task_override: str | None = None
+    first_frame_asset_id: str | None = None
+    last_frame_asset_id: str | None = None
+    source_video_asset_id: str | None = None
+    ref_image_asset_ids: list[str] = Field(default_factory=list)
+    ref_video_asset_ids: list[str] = Field(default_factory=list)
+    parent_job_id: str | None = None
+    previous_interaction_id: str | None = None
+    interaction_id: str | None = None
+    output_url: str | None = None
+    output_thumb_url: str | None = None
+    output_duration_seconds: float | None = None
+    output_width: int | None = None
+    output_height: int | None = None
+    output_has_audio: bool = True
+    output_size_bytes: int | None = None
+    cost_usd: float = 0.0
+    error_message: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None = None
 
 
 class ChatSendRequest(BaseModel):
@@ -256,7 +421,8 @@ class MusicGenerateRequest(BaseModel):
 
 class ExportRequest(BaseModel):
     episode_id: str | None = None
-    resolution: Literal["720p", "1080p"] = "1080p"
+    resolution: Literal["720p", "1080p", "4k"] = "1080p"
+    crossfade_sec: float = Field(default=0.0, ge=0.0, le=1.5)
     include_bgm: bool = True
     burn_subtitles: bool = False
 
@@ -268,6 +434,7 @@ class ExportOut(BaseModel):
     local_path: str
     resolution: str
     duration_sec: float
+    crossfade_sec: float = 0.0
     include_bgm: bool
     burn_subtitles: bool
     created_at: datetime

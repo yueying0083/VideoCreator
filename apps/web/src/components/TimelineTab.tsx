@@ -11,7 +11,12 @@ interface TimelineTabProps {
   onGenerateBgm: (prompt: string, mode: "clip" | "pro") => Promise<void>;
   onUploadBgm: (file: File) => Promise<void>;
   onAutoSubtitles: () => Promise<void>;
-  onExport: (payload: { resolution: "720p" | "1080p"; include_bgm: boolean; burn_subtitles: boolean }) => Promise<void>;
+  onExport: (payload: {
+    resolution: "720p" | "1080p" | "4k";
+    crossfade_sec: number;
+    include_bgm: boolean;
+    burn_subtitles: boolean;
+  }) => Promise<void>;
 }
 
 export const TimelineTab: React.FC<TimelineTabProps> = ({
@@ -30,7 +35,8 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
   );
   const [bgmVol, setBgmVol] = useState(project.bgm_volume);
   const [srtDraft, setSrtDraft] = useState(project.subtitle_srt);
-  const [resolution, setResolution] = useState<"720p" | "1080p">("1080p");
+  const [resolution, setResolution] = useState<"720p" | "1080p" | "4k">("1080p");
+  const [crossfadeSec, setCrossfadeSec] = useState<number>(0.35);
   const [includeBgm, setIncludeBgm] = useState(true);
   const [burnSubtitles, setBurnSubtitles] = useState(false);
 
@@ -131,13 +137,13 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
         )}
       </div>
 
-      {/* Track 2 & 3: BGM (Lyria 3) + Subtitles */}
+      {/* Track 2 & 3: BGM (Lyria 3.5) + Subtitles */}
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <div className="space-y-3 rounded-xl border border-studio-border bg-studio-card p-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-sm font-semibold text-white">
               <Music className="h-4 w-4 text-emerald-400" />
-              配乐轨（Lyria 3 生成 / 本地导入）
+              配乐轨（Lyria 3.5 生成 / 本地导入）
             </div>
             <label className="studio-btn-secondary cursor-pointer text-[11px]">
               <Upload className="h-3 w-3" /> 上传音乐
@@ -165,10 +171,10 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
           <div className="flex flex-wrap gap-2">
             <button className="studio-btn-primary" onClick={() => onGenerateBgm(bgmPrompt, "clip")}>
               <Sparkles className="h-3.5 w-3.5" />
-              Lyria 3 生成 30s 配乐 (~$0.04)
+              Lyria 3.5 生成主题配乐 (~$0.04)
             </button>
             <button className="studio-btn-secondary" onClick={() => onGenerateBgm(bgmPrompt, "pro")}>
-              Lyria 3 Pro 完整曲目 (~$0.08)
+              生成完整长曲 (~$0.08)
             </button>
           </div>
 
@@ -229,10 +235,24 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
               <select
                 className="rounded border border-studio-border bg-studio-bg px-2.5 py-1"
                 value={resolution}
-                onChange={(e) => setResolution(e.target.value as "720p" | "1080p")}
+                onChange={(e) => setResolution(e.target.value as "720p" | "1080p" | "4k")}
               >
                 <option value="1080p">1080p Full HD</option>
                 <option value="720p">720p 快速预览</option>
+                <option value="4k">4K Ultra HD</option>
+              </select>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-slate-400">转场:</span>
+              <select
+                className="rounded border border-studio-border bg-studio-bg px-2.5 py-1"
+                value={crossfadeSec}
+                onChange={(e) => setCrossfadeSec(Number(e.target.value))}
+              >
+                <option value={0}>0s 硬切（直连）</option>
+                <option value={0.35}>0.35s 柔和叠化</option>
+                <option value={0.6}>0.6s 慢叠化</option>
+                <option value={1.0}>1.0s 长叠化</option>
               </select>
             </div>
             <label className="flex cursor-pointer items-center gap-1.5">
@@ -258,7 +278,14 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
           <button
             className="studio-btn-primary px-4 py-2 text-xs"
             disabled={readyClips.length === 0}
-            onClick={() => onExport({ resolution, include_bgm: includeBgm, burn_subtitles: burnSubtitles })}
+            onClick={() =>
+              onExport({
+                resolution,
+                crossfade_sec: crossfadeSec,
+                include_bgm: includeBgm,
+                burn_subtitles: burnSubtitles,
+              })
+            }
           >
             <Film className="h-4 w-4" />
             本地 FFmpeg 一键合片导出（$0 云费用）
@@ -277,6 +304,7 @@ export const TimelineTab: React.FC<TimelineTabProps> = ({
                 <div className="flex items-center justify-between text-xs">
                   <div className="text-slate-300">
                     {exp.resolution} · {exp.duration_sec.toFixed(1)}s
+                    {exp.crossfade_sec > 0 && ` · 叠化 ${exp.crossfade_sec}s`}
                     {exp.include_bgm && " · 含BGM"}
                     {exp.burn_subtitles && " · 含字幕"}
                   </div>

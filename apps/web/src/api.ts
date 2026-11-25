@@ -2,14 +2,18 @@ import type {
   Asset,
   BudgetSummary,
   ChatMessage,
+  ConnectionTestResult,
+  EnhancedPromptResult,
   Episode,
   ExportRecord,
   JobTask,
   Project,
   Settings,
   Shot,
+  StudioJob,
   Take,
   VideoEngine,
+  VideoResolution,
 } from "./types";
 
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
@@ -30,11 +34,28 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export function formatBytes(bytes?: number | null): string {
+  if (!bytes || bytes <= 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+export function formatDuration(sec?: number | null): string {
+  if (sec === null || sec === undefined) return "";
+  return `${sec.toFixed(1)}s`;
+}
+
 export const api = {
   // Settings & Budget
   getSettings: () => req<Settings>("/api/settings"),
   updateSettings: (payload: Partial<Settings> & { gemini_api_key?: string }) =>
     req<Settings>("/api/settings", { method: "PUT", body: JSON.stringify(payload) }),
+  testConnection: (gemini_api_key?: string) =>
+    req<ConnectionTestResult>("/api/settings/test-connection", {
+      method: "POST",
+      body: JSON.stringify({ gemini_api_key: gemini_api_key || null }),
+    }),
   getBudget: () => req<BudgetSummary>("/api/settings/budget"),
 
   // Projects
@@ -90,6 +111,13 @@ export const api = {
   listAssets: (pid: string) => req<Asset[]>(`/api/projects/${pid}/assets`),
   createAsset: (pid: string, payload: { name: string; kind: string; description: string }) =>
     req<Asset>(`/api/projects/${pid}/assets`, { method: "POST", body: JSON.stringify(payload) }),
+  uploadMediaAsset: (pid: string, file: File, kind?: string, name?: string) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (kind) fd.append("kind", kind);
+    if (name) fd.append("name", name);
+    return req<Asset>(`/api/projects/${pid}/assets/upload-media`, { method: "POST", body: fd });
+  },
   updateAsset: (pid: string, aid: string, payload: Partial<Asset>) =>
     req<Asset>(`/api/projects/${pid}/assets/${aid}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteAsset: (pid: string, aid: string) =>
@@ -99,6 +127,16 @@ export const api = {
     fd.append("file", file);
     return req<Asset>(`/api/projects/${pid}/assets/${aid}/upload`, { method: "POST", body: fd });
   },
+  prepAsset: (
+    pid: string,
+    aid: string,
+    payload: { start_seconds?: number; duration?: number; strip_audio?: boolean; max_edge?: number }
+  ) => req<Asset>(`/api/projects/${pid}/assets/${aid}/prep`, { method: "POST", body: JSON.stringify(payload) }),
+  extractAssetFrame: (pid: string, aid: string, position: "first" | "last" | "custom" = "last", timestamp_seconds?: number) =>
+    req<Asset>(`/api/projects/${pid}/assets/${aid}/extract-frame`, {
+      method: "POST",
+      body: JSON.stringify({ position, timestamp_seconds }),
+    }),
   generateAssetImage: (pid: string, aid: string, prompt_override?: string) =>
     req<JobTask>(`/api/projects/${pid}/assets/${aid}/generate`, {
       method: "POST",
@@ -130,9 +168,42 @@ export const api = {
   generateVideo: (
     pid: string,
     sid: string,
-    payload: { engine: VideoEngine; duration_sec: number; with_audio: boolean; use_end_frame: boolean }
+    payload: { engine: VideoEngine; duration_sec: number; resolution?: VideoResolution; with_audio: boolean; use_end_frame: boolean }
   ) =>
     req<JobTask>(`/api/projects/${pid}/shots/${sid}/video/generate`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  batchGenerateShots: (
+    pid: string,
+    payload: {
+      episode_id?: string | null;
+      engine: VideoEngine;
+      resolution: VideoResolution;
+      with_audio: boolean;
+      use_end_frame: boolean;
+      only_pending: boolean;
+      chain_last_frame: boolean;
+    }
+  ) =>
+    req<{ submitted_count: number; tasks: JobTask[] }>(`/api/projects/${pid}/shots/batch-generate`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  iterateTake: (
+    pid: string,
+    sid: string,
+    tid: string,
+    payload: {
+      action: "edit" | "extend";
+      prompt: string;
+      duration_sec: number;
+      resolution: VideoResolution;
+      strip_audio: boolean;
+      ref_asset_ids?: string[];
+    }
+  ) =>
+    req<JobTask>(`/api/projects/${pid}/shots/${sid}/takes/${tid}/iterate`, {
       method: "POST",
       body: JSON.stringify(payload),
     }),
@@ -170,11 +241,78 @@ export const api = {
       { method: "POST" }
     ),
 
+  // Omni Studio Tab
+  enhancePrompt: (
+    pid: string,
+    payload: {
+      prompt: string;
+      mode?: string;
+      duration_seconds?: number;
+      aspect_ratio?: "16:9" | "9:16";
+      single_scene?: boolean;
+      include_timecodes?: boolean;
+      audio_preference?: string;
+      style_hint?: string;
+      has_first_frame?: boolean;
+      has_last_frame?: boolean;
+      ref_image_count?: number;
+      ref_video_count?: number;
+      model?: string;
+    }
+  ) =>
+    req<EnhancedPromptResult>(`/api/projects/${pid}/studio/enhance-prompt`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  listStudioJobs: (pid: string) => req<StudioJob[]>(`/api/projects/${pid}/studio/jobs`),
+  createStudioJob: (
+    pid: string,
+    payload: {
+      mode: string;
+      prompt: string;
+      enhanced_prompt?: string;
+      aspect_ratio: "16:9" | "9:16";
+      duration_seconds: number;
+      resolution: VideoResolution;
+      strip_audio?: boolean;
+      first_frame_asset_id?: string | null;
+      last_frame_asset_id?: string | null;
+      source_video_asset_id?: string | null;
+      ref_image_asset_ids?: string[];
+      ref_video_asset_ids?: string[];
+      parent_job_id?: string | null;
+      previous_interaction_id?: string | null;
+    }
+  ) =>
+    req<StudioJob>(`/api/projects/${pid}/studio/jobs`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  getStudioJobLineage: (pid: string, jid: string) =>
+    req<StudioJob[]>(`/api/projects/${pid}/studio/jobs/${jid}/lineage`),
+  extractStudioJobFrame: (pid: string, jid: string, position: "first" | "last" | "custom" = "last") =>
+    req<Asset>(`/api/projects/${pid}/studio/jobs/${jid}/extract-frame`, {
+      method: "POST",
+      body: JSON.stringify({ position }),
+    }),
+  saveStudioJobAsAsset: (pid: string, jid: string) =>
+    req<Asset>(`/api/projects/${pid}/studio/jobs/${jid}/save-as-asset`, { method: "POST" }),
+  sendStudioJobToShot: (pid: string, jid: string, sid: string) =>
+    req<Take>(`/api/projects/${pid}/studio/jobs/${jid}/send-to-shot/${sid}`, { method: "POST" }),
+  deleteStudioJob: (pid: string, jid: string) =>
+    req<{ deleted: boolean; id: string }>(`/api/projects/${pid}/studio/jobs/${jid}`, { method: "DELETE" }),
+
   // Tasks & Exports
   listTasks: (pid?: string) => req<JobTask[]>(pid ? `/api/tasks?project_id=${pid}` : "/api/tasks"),
   listExports: (pid: string) => req<ExportRecord[]>(`/api/projects/${pid}/exports`),
   createExport: (
     pid: string,
-    payload: { episode_id?: string | null; resolution: "720p" | "1080p"; include_bgm: boolean; burn_subtitles: boolean }
+    payload: {
+      episode_id?: string | null;
+      resolution: "720p" | "1080p" | "4k";
+      crossfade_sec?: number;
+      include_bgm: boolean;
+      burn_subtitles: boolean;
+    }
   ) => req<JobTask>(`/api/projects/${pid}/exports`, { method: "POST", body: JSON.stringify(payload) }),
 };

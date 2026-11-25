@@ -5,8 +5,16 @@ Write-Host "=== Starting Video Creator Studio ===" -ForegroundColor Cyan
 
 $VenvPython = Join-Path $Root "apps\api\.venv\Scripts\python.exe"
 if (-not (Test-Path $VenvPython)) {
-    Write-Host "[1/2] Creating Python 3.11 venv and installing backend deps..." -ForegroundColor Yellow
-    py -3.11 -m venv (Join-Path $Root "apps\api\.venv")
+    Write-Host "[1/2] Creating Python venv and installing backend deps..." -ForegroundColor Yellow
+    if (Get-Command py -ErrorAction SilentlyContinue) {
+        try {
+            py -3.11 -m venv (Join-Path $Root "apps\api\.venv")
+        } catch {
+            python -m venv (Join-Path $Root "apps\api\.venv")
+        }
+    } else {
+        python -m venv (Join-Path $Root "apps\api\.venv")
+    }
     & $VenvPython -m pip install --upgrade pip
     & $VenvPython -m pip install -r (Join-Path $Root "apps\api\requirements.txt")
 }

@@ -21,6 +21,7 @@ def serialize_export(e: ExportRecord) -> ExportOut:
         local_path=str(abs_p) if abs_p else "",
         resolution=e.resolution,
         duration_sec=e.duration_sec,
+        crossfade_sec=float(getattr(e, "crossfade_sec", 0.0) or 0.0),
         include_bgm=e.include_bgm,
         burn_subtitles=e.burn_subtitles,
         created_at=e.created_at,
@@ -96,6 +97,7 @@ async def create_export(project_id: str, payload: ExportRequest, db: Session = D
             bgm_path=bgm_abs,
             bgm_volume=bgm_vol,
             subtitle_srt=srt_text,
+            crossfade_sec=payload.crossfade_sec,
         )
         progress_cb(90, "记录成片档案...")
         session = SessionLocal()
@@ -105,6 +107,7 @@ async def create_export(project_id: str, payload: ExportRequest, db: Session = D
                 file_path=rel_out,
                 resolution=payload.resolution,
                 duration_sec=final_dur,
+                crossfade_sec=payload.crossfade_sec,
                 include_bgm=bool(bgm_abs and bgm_abs.exists()),
                 burn_subtitles=bool(srt_text and srt_text.strip()),
             )

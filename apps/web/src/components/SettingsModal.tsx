@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
-import { CheckCircle2, KeyRound, Save, X } from "lucide-react";
-import type { AppMode, Settings } from "../types";
+import { CheckCircle2, KeyRound, Loader2, PlugZap, Save, X, XCircle } from "lucide-react";
+import { api } from "../api";
+import type { AppMode, ConnectionTestResult, Settings } from "../types";
 
 interface SettingsModalProps {
   open: boolean;
@@ -9,21 +10,33 @@ interface SettingsModalProps {
   onSave: (payload: Partial<Settings> & { gemini_api_key?: string }) => Promise<void>;
 }
 
+const GEMINI4_MODELS = [
+  "gemini-4-hydrogen",
+  "gemini-4-neon",
+  "gemini-4-argon",
+  "gemini-4-carbon",
+  "gemini-3.5-flash-lite",
+];
+
 export const SettingsModal: React.FC<SettingsModalProps> = ({ open, settings, onClose, onSave }) => {
   const [appMode, setAppMode] = useState<AppMode>("auto");
   const [geminiKey, setGeminiKey] = useState("");
   const [vertexProject, setVertexProject] = useState("");
   const [vertexLocation, setVertexLocation] = useState("us-central1");
   const [credsPath, setCredsPath] = useState("");
-  const [textModel, setTextModel] = useState("gemini-2.5-flash");
-  const [imageModel, setImageModel] = useState("gemini-3.1-flash-image");
+  const [textModel, setTextModel] = useState("gemini-4-hydrogen");
+  const [imageModel, setImageModel] = useState("gemini-nano-banana-2.1");
   const [omniModel, setOmniModel] = useState("gemini-omni-1.2-flash");
   const [veoLite, setVeoLite] = useState("veo-3.1-lite-generate-001");
   const [veoFast, setVeoFast] = useState("veo-3.1-fast-generate-001");
   const [veoStd, setVeoStd] = useState("veo-3.1-generate-001");
-  const [musicModel, setMusicModel] = useState("lyria-3-clip-preview");
+  const [musicModel, setMusicModel] = useState("lyria-3.5");
+  const [maxConcurrent, setMaxConcurrent] = useState(3);
+  const [reqTimeout, setReqTimeout] = useState(900);
   const [budget, setBudget] = useState(40);
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
 
   useEffect(() => {
     if (!settings) return;
@@ -39,10 +52,30 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, settings, on
     setVeoFast(settings.veo_fast_model);
     setVeoStd(settings.veo_standard_model);
     setMusicModel(settings.music_model);
+    setMaxConcurrent(settings.max_concurrent_jobs || 3);
+    setReqTimeout(settings.video_request_timeout || 900);
     setBudget(settings.monthly_budget_usd);
+    setTestResult(null);
   }, [settings, open]);
 
   if (!open || !settings) return null;
+
+  const handleTest = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await api.testConnection(geminiKey);
+      setTestResult(res);
+    } catch (e) {
+      setTestResult({
+        ok: false,
+        message: e instanceof Error ? e.message : "测试失败",
+        checked_model: null,
+      });
+    } finally {
+      setTesting(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -61,6 +94,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, settings, on
         veo_fast_model: veoFast,
         veo_standard_model: veoStd,
         music_model: musicModel,
+        max_concurrent_jobs: maxConcurrent,
+        video_request_timeout: reqTimeout,
         monthly_budget_usd: budget,
       });
       onClose();
@@ -127,9 +162,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, settings, on
             </div>
           </div>
 
-          <div className="rounded-xl border border-studio-border bg-studio-card p-4 space-y-3">
-            <div className="text-xs font-semibold uppercase tracking-wider text-indigo-400">
-              1. Gemini API（Google AI Studio · 推荐使用 Ultra 开发者额度）
+          <div className="space-y-3 rounded-xl border border-studio-border bg-studio-card p-4">
+            <div className="flex items-center justify-between">
+              <div className="text-xs font-semibold uppercase tracking-wider text-indigo-400">
+                1. Gemini API（Google AI Studio · 推荐使用 Ultra 开发者额度）
+              </div>
+              <button
+                type="button"
+                className="studio-btn-secondary py-1 text-[11px]"
+                onClick={handleTest}
+                disabled={testing}
+              >
+                {testing ? <Loader2 className="h-3 w-3 animate-spin" /> : <PlugZap className="h-3 w-3 text-emerald-400" />}
+                测试连通性
+              </button>
             </div>
             <div>
               <label className="mb-1 block text-xs text-slate-300">GEMINI_API_KEY</label>
@@ -141,12 +187,28 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, settings, on
                 onChange={(e) => setGeminiKey(e.target.value)}
               />
               <p className="mt-1 text-[11px] text-slate-400">
-                驱动：Gemini 导演对话/审片、Nano Banana 2 生图、Gemini Omni 视频、Lyria 3 配乐。
+                驱动：Gemini 4 导演/审片、Nano Banana 2.1 生图、Gemini Omni 1.2 视频、Lyria 3.5 配乐。
               </p>
             </div>
+            {testResult && (
+              <div
+                className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-xs ${
+                  testResult.ok
+                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
+                    : "border-rose-500/30 bg-rose-500/10 text-rose-200"
+                }`}
+              >
+                {testResult.ok ? (
+                  <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+                ) : (
+                  <XCircle className="h-4 w-4 shrink-0 text-rose-400" />
+                )}
+                <span>{testResult.message}</span>
+              </div>
+            )}
           </div>
 
-          <div className="rounded-xl border border-studio-border bg-studio-card p-4 space-y-3">
+          <div className="space-y-3 rounded-xl border border-studio-border bg-studio-card p-4">
             <div className="text-xs font-semibold uppercase tracking-wider text-emerald-400">
               2. Vertex AI（可选 · 调用 Veo 3.1 Lite / Fast / Standard 正式版）
             </div>
@@ -184,15 +246,25 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, settings, on
 
           <details className="rounded-xl border border-studio-border bg-studio-card p-4">
             <summary className="cursor-pointer text-xs font-semibold text-slate-300">
-              高级选项：自定义 2026 Google 模型 ID
+              高级选项：2026 Google 官方模型 ID 与并发超时设置
             </summary>
             <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
               <div>
-                <label className="mb-1 block text-[11px] text-slate-400">导演/审片模型</label>
-                <input className="studio-input font-mono text-xs" value={textModel} onChange={(e) => setTextModel(e.target.value)} />
+                <label className="mb-1 block text-[11px] text-slate-400">导演/拆镜/审片模型 (Gemini 4)</label>
+                <input
+                  list="gemini4-models-list"
+                  className="studio-input font-mono text-xs"
+                  value={textModel}
+                  onChange={(e) => setTextModel(e.target.value)}
+                />
+                <datalist id="gemini4-models-list">
+                  {GEMINI4_MODELS.map((m) => (
+                    <option key={m} value={m} />
+                  ))}
+                </datalist>
               </div>
               <div>
-                <label className="mb-1 block text-[11px] text-slate-400">生图模型 (Nano Banana 2)</label>
+                <label className="mb-1 block text-[11px] text-slate-400">生图模型 (Nano Banana 2.1)</label>
                 <input className="studio-input font-mono text-xs" value={imageModel} onChange={(e) => setImageModel(e.target.value)} />
               </div>
               <div>
@@ -200,7 +272,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, settings, on
                 <input className="studio-input font-mono text-xs" value={omniModel} onChange={(e) => setOmniModel(e.target.value)} />
               </div>
               <div>
-                <label className="mb-1 block text-[11px] text-slate-400">配乐模型 (Lyria 3)</label>
+                <label className="mb-1 block text-[11px] text-slate-400">配乐模型 (Lyria 3.5)</label>
                 <input className="studio-input font-mono text-xs" value={musicModel} onChange={(e) => setMusicModel(e.target.value)} />
               </div>
               <div>
@@ -211,9 +283,34 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, settings, on
                 <label className="mb-1 block text-[11px] text-slate-400">Veo 3.1 Fast</label>
                 <input className="studio-input font-mono text-xs" value={veoFast} onChange={(e) => setVeoFast(e.target.value)} />
               </div>
-              <div className="md:col-span-2">
+              <div>
                 <label className="mb-1 block text-[11px] text-slate-400">Veo 3.1 Standard</label>
                 <input className="studio-input font-mono text-xs" value={veoStd} onChange={(e) => setVeoStd(e.target.value)} />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="mb-1 block text-[11px] text-slate-400">最大并发 (1-6)</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={6}
+                    className="studio-input font-mono text-xs"
+                    value={maxConcurrent}
+                    onChange={(e) => setMaxConcurrent(Number(e.target.value) || 3)}
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-[11px] text-slate-400">请求超时(秒)</label>
+                  <input
+                    type="number"
+                    min={120}
+                    max={1800}
+                    step={60}
+                    className="studio-input font-mono text-xs"
+                    value={reqTimeout}
+                    onChange={(e) => setReqTimeout(Number(e.target.value) || 900)}
+                  />
+                </div>
               </div>
             </div>
           </details>
@@ -221,7 +318,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, settings, on
           <div className="flex items-center justify-between rounded-lg bg-studio-bg px-3 py-2 text-xs">
             <span className="flex items-center gap-1.5 text-slate-300">
               <CheckCircle2 className={`h-4 w-4 ${settings.ffmpeg_available ? "text-emerald-400" : "text-rose-400"}`} />
-              本地 FFmpeg：{settings.ffmpeg_available ? "就绪" : "未检测到"}
+              FFmpeg：{settings.ffmpeg_available ? "就绪" : "未检测到"} · FFprobe：{settings.ffprobe_available ? "就绪" : "回退模式"}
             </span>
             <span className="max-w-xs truncate font-mono text-[11px] text-slate-500" title={settings.ffmpeg_path}>
               {settings.ffmpeg_path}
