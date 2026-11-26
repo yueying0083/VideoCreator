@@ -1102,3 +1102,226 @@ def test_openai_image_provider_concurrency_and_batch_assets(tmp_path: Path, monk
         finally:
             client.delete(f"/api/projects/{pid}")
 
+
+def test_gpt_first_keyframes_anti_collage_i2v_and_atomic_splitting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify anti-collage prompts, openai_all default, dialogue_mode, start-frame I2V isolation, batch-keyframes, and splitting heuristics."""
+    from types import SimpleNamespace
+    from app import config as cfg_mod
+    from app.database import Asset, Project, SessionLocal, Shot, Take, init_db
+    from app.routers.assets import _build_portrait_prompt
+    from app.routers.shots import _compose_shot_prompt, _execute_shot_video_sync
+
+    # 1. Anti-collage portrait prompts for character, scene, and prop
+    proj_stub = SimpleNamespace(style_prompt="Cinematic 35mm")
+    p_char = _build_portrait_prompt(proj_stub, SimpleNamespace(name="陈老九", kind="character", description="粗布新郎袍"))
+    p_scene = _build_portrait_prompt(proj_stub, SimpleNamespace(name="东院正房", kind="scene", description="北方老宅"))
+    p_prop = _build_portrait_prompt(proj_stub, SimpleNamespace(name="铁匣子", kind="prop", description="黑铁方匣"))
+    for prompt_txt in (p_char, p_scene, p_prop):
+        assert "NO collage" in prompt_txt and "grid" in prompt_txt and "NO split screen" in prompt_txt
+    assert "NO people" in p_scene and "NO people" in p_prop
+
+    # 2. Natural-language ordinal bindings for R2V & start-frame + refs
+    p_r2v = build_natural_language_prompt(
+        prompt="Chen Laojiu enters the hall",
+        mode="reference_to_video",
+        has_first_frame=False,
+        has_last_frame=False,
+        ref_image_count=2,
+        ref_image_labels=["character '陈老九'", "scene '东院正房'"],
+    )
+    assert "Image 1 is character '陈老九'" in p_r2v
+    assert "Image 2 is scene '东院正房'" in p_r2v
+    assert "split-screen collages" in p_r2v
+
+    p_i2v_refs = build_natural_language_prompt(
+        prompt="He turns his head",
+        mode="first_frame",
+        has_first_frame=True,
+        has_last_frame=False,
+        ref_image_count=1,
+        ref_image_labels=["character '赵宝珠'"],
+    )
+    assert "Use the first image as the starting frame" in p_i2v_refs
+    assert "Image 2 is character '赵宝珠'" in p_i2v_refs
+
+    # 3. _compose_shot_prompt: narration suppresses spoken dialogue & avoids ".."
+    shot_narration = SimpleNamespace(
+        video_prompt_en="Continuous, unbroken single shot.",
+        visual_prompt_zh="雪夜柴房",
+        sfx_prompt="winter wind",
+        dialogue="赵老爷纳村花，大小姐却招贫农入赘。",
+        dialogue_mode="narration",
+    )
+    composed_nar = _compose_shot_prompt(shot_narration, with_audio=True)
+    assert ".." not in composed_nar
+    assert "Spoken dialogue:" not in composed_nar
+    assert "No spoken dialogue" in composed_nar
+
+    shot_spoken = SimpleNamespace(
+        video_prompt_en="Continuous, unbroken single shot.",
+        visual_prompt_zh="洞房",
+        sfx_prompt="candle flicker",
+        dialogue="赶紧圆房！",
+        dialogue_mode="spoken",
+    )
+    composed_spk = _compose_shot_prompt(shot_spoken, with_audio=True)
+    assert ".." not in composed_spk
+    assert 'Spoken dialogue: "赶紧圆房！".' in composed_spk
+
+    # 4. load_settings defaults image_provider to openai_all when OPENAI_API_KEY is set and IMAGE_PROVIDER unset
+    empty_env = tmp_path / "empty.env"
+    empty_env.write_text("", encoding="utf-8")
+    monkeypatch.setattr(cfg_mod, "ENV_PATH", empty_env)
+    monkeypatch.delenv("IMAGE_PROVIDER", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-openai-default-all")
+    loaded = cfg_mod.load_settings()
+    assert loaded.image_provider == "openai_all"
+    assert loaded.use_openai_for("asset") is True
+    assert loaded.use_openai_for("turnaround") is True
+    assert loaded.use_openai_for("keyframe") is True
+
+    # 5. Start-frame I2V isolation + clear keyframe + batch-keyframes + QA improved prompt + novel splitting heuristic
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    init_db()
+    sample_img = _make_sample_image(tmp_path / "asset_ref.png", color="green")
+    sample_start = _make_sample_image(tmp_path / "start_frame.png", color="blue")
+    sample_vid = _make_sample_video(tmp_path / "vid.mp4", duration=2.0, color="purple")
+
+    captured_video_calls: list[dict] = []
+
+    def fake_generate_video(**kwargs):
+        captured_video_calls.append(kwargs)
+        out_p = Path(kwargs["output_path"])
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_bytes(sample_vid.read_bytes())
+        return out_p, "gemini-omni-1.2-flash", True, "demo_iid_123"
+
+    monkeypatch.setattr("app.routers.shots.generate_video", fake_generate_video)
+
+    with TestClient(app) as client:
+        proj = client.post("/api/projects", json={"name": "I2V隔离与分镜测试", "aspect_ratio": "16:9"}).json()
+        pid = proj["id"]
+        try:
+            # Novel import heuristic: ~1300 chars should suggest ~10 shots (6..30), and target_shots=30 accepted
+            long_text = "第一章 夜雪\n" + ("陈老九蹲在柴房阴影里攥着粗纸药包，听着远处更鼓响起。" * 52)
+            eps = client.post(
+                f"/api/projects/{pid}/novel/import-text",
+                json={"novel_title": "测试小说", "text": long_text, "split_mode": "auto_chapter", "chars_per_episode": 1200},
+            ).json()
+            assert len(eps) >= 1
+            assert eps[0]["target_shots"] >= 8
+            bd = client.post(
+                f"/api/projects/{pid}/novel/episodes/{eps[0]['id']}/breakdown",
+                json={"target_shots": 30, "replace_existing": True},
+            )
+            assert bd.status_code == 200
+            assert _wait_task(client, bd.json()["id"])["status"] == "completed"
+
+            # Create 2 image assets & 2 shots (using project-relative storage paths)
+            from app.services.storage import allocate_rel_path
+
+            rel_a1, abs_a1 = allocate_rel_path(pid, "assets", "png", prefix="ref1")
+            abs_a1.write_bytes(sample_img.read_bytes())
+            rel_a2, abs_a2 = allocate_rel_path(pid, "assets", "png", prefix="ref2")
+            abs_a2.write_bytes(sample_img.read_bytes())
+            rel_s1_start, abs_s1_start = allocate_rel_path(pid, "frames", "png", prefix="start1")
+            abs_s1_start.write_bytes(sample_start.read_bytes())
+
+            db = SessionLocal()
+            try:
+                a1 = Asset(project_id=pid, name="陈老九", kind="character", media_type="image", file_path=rel_a1)
+                a2 = Asset(project_id=pid, name="东院正房", kind="scene", media_type="image", file_path=rel_a2)
+                db.add_all([a1, a2])
+                db.flush()
+                s1 = Shot(
+                    project_id=pid,
+                    order_index=0,
+                    title="带首帧镜头",
+                    video_prompt_en="He grips the packet.",
+                    dialogue="旁白词",
+                    dialogue_mode="narration",
+                    start_frame_path=rel_s1_start,
+                    asset_ids_json=json.dumps([a1.id, a2.id]),
+                )
+                s2 = Shot(
+                    project_id=pid,
+                    order_index=1,
+                    title="无首帧镜头",
+                    video_prompt_en="He looks up.",
+                    dialogue="谁！",
+                    dialogue_mode="spoken",
+                    start_frame_path=None,
+                    asset_ids_json=json.dumps([a1.id, a2.id]),
+                )
+                db.add_all([s1, s2])
+                db.commit()
+                s1_id, s2_id = s1.id, s2.id
+            finally:
+                db.close()
+
+            # With start_frame and use_asset_refs_with_start_frame=False -> 0 ref images passed
+            _execute_shot_video_sync(
+                project_id=pid,
+                shot_id=s1_id,
+                task_id="t_sync_1",
+                engine="omni_flash",
+                duration_sec=5,
+                resolution="360p",
+                with_audio=True,
+                use_end_frame=False,
+                use_asset_refs_with_start_frame=False,
+            )
+            assert captured_video_calls[-1]["mode"] == "first_frame"
+            assert captured_video_calls[-1]["reference_image_paths"] == []
+
+            # Clear start frame via DELETE -> falls back to reference_to_video with ordinal labels
+            clr = client.delete(f"/api/projects/{pid}/shots/{s1_id}/keyframe/start")
+            assert clr.status_code == 200
+            assert clr.json()["start_frame_url"] is None
+
+            _execute_shot_video_sync(
+                project_id=pid,
+                shot_id=s1_id,
+                task_id="t_sync_2",
+                engine="omni_flash",
+                duration_sec=5,
+                resolution="360p",
+                with_audio=True,
+                use_end_frame=False,
+                use_asset_refs_with_start_frame=False,
+            )
+            assert captured_video_calls[-1]["mode"] == "reference_to_video"
+            assert len(captured_video_calls[-1]["reference_image_paths"]) == 2
+            assert captured_video_calls[-1]["ref_image_labels"] == ["character '陈老九'", "scene '东院正房'"]
+
+            # Batch keyframes: generates missing start frames for s1 & s2, then skips when called again
+            bk1 = client.post(
+                f"/api/projects/{pid}/shots/batch-keyframes",
+                json={"which": "start", "only_missing": True},
+            )
+            assert bk1.status_code == 200
+            bk1_data = bk1.json()
+            assert bk1_data["submitted_count"] >= 2
+            for t in bk1_data["tasks"]:
+                assert _wait_task(client, t["id"])["status"] == "completed"
+
+            bk2 = client.post(
+                f"/api/projects/{pid}/shots/batch-keyframes",
+                json={"which": "start", "only_missing": True},
+            ).json()
+            assert bk2["submitted_count"] == 0 and bk2["skipped_count"] >= 2
+
+            # QA saves qa_improved_prompt separately on TakeOut
+            shots_now = client.get(f"/api/projects/{pid}/shots").json()
+            s1_now = next(s for s in shots_now if s["id"] == s1_id)
+            take_id = s1_now["selected_take_id"]
+            qa_job = client.post(f"/api/projects/{pid}/shots/{s1_id}/takes/{take_id}/qa").json()
+            assert _wait_task(client, qa_job["id"])["status"] == "completed"
+            shots_after_qa = client.get(f"/api/projects/{pid}/shots").json()
+            s1_qa = next(s for s in shots_after_qa if s["id"] == s1_id)
+            sel_take = next(t for t in s1_qa["takes"] if t["id"] == take_id)
+            assert sel_take["qa_improved_prompt"]
+            assert "优化建议 Prompt：" not in (sel_take["qa_feedback"] or "")
+        finally:
+            client.delete(f"/api/projects/{pid}")
+

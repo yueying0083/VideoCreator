@@ -118,15 +118,29 @@ def build_natural_language_prompt(
     has_last_frame: bool,
     same_loop_frame: bool = False,
     ref_image_count: int = 0,
+    ref_image_labels: list[str] | None = None,
     has_source_video: bool = False,
 ) -> str:
     """Attach clean natural-language media role bindings per Gemini Omni 1.2 Flash specification."""
     text = (prompt or "").strip()
     lower = text.lower()
+    labels = [lbl.strip() for lbl in (ref_image_labels or []) if lbl and lbl.strip()]
+
+    def _format_ref_bindings(start_idx: int) -> str:
+        if not labels:
+            return ""
+        parts = [f"Image {start_idx + i} is {lbl}" for i, lbl in enumerate(labels)]
+        return "; ".join(parts)
 
     if mode == "extend":
         if not any(tok in lower for tok in ("extend", "continue", "continuation", "keep going", "续写", "继续")):
             text = f"Extend this video seamlessly. {text}".strip()
+        if labels:
+            bindings = _format_ref_bindings(1)
+            text = _append_role_hint(
+                text,
+                f"Use the attached reference image(s) for visual consistency ({bindings}).",
+            )
     elif has_first_frame and has_last_frame:
         if same_loop_frame:
             if "starting frame" not in lower and "first frame" not in lower:
@@ -141,12 +155,30 @@ def build_natural_language_prompt(
                     text,
                     "Use the first image as the starting frame and the second image as the final frame.",
                 )
+        if ref_image_count > 0 and labels:
+            bindings = _format_ref_bindings(3)
+            text = _append_role_hint(
+                text,
+                f"Use the remaining images strictly as visual consistency references (not as scene cuts or collages): {bindings}.",
+            )
     elif has_first_frame:
         if "starting frame" not in lower and "first frame" not in lower:
             ref_label = "the first image" if ref_image_count > 0 else "this image"
             text = _append_role_hint(text, f"Use {ref_label} as the starting frame.")
+        if ref_image_count > 0 and labels:
+            bindings = _format_ref_bindings(2)
+            text = _append_role_hint(
+                text,
+                f"Use the remaining images strictly as visual consistency references (not as scene cuts or collages): {bindings}.",
+            )
     elif ref_image_count > 0 and not has_source_video:
-        if "reference" not in lower and "参考" not in lower:
+        if labels:
+            bindings = _format_ref_bindings(1)
+            text = _append_role_hint(
+                text,
+                f"Use these provided images strictly as visual character, prop, and environment references rather than literal starting frames or split-screen collages: {bindings}.",
+            )
+        elif "reference" not in lower and "参考" not in lower:
             text = _append_role_hint(
                 text,
                 "Use the provided image(s) as visual character, subject, and style references rather than literal starting frames.",
@@ -222,6 +254,7 @@ def generate_omni_video(
     last_frame_asset_id: str | None = None,
     source_video_asset_id: str | None = None,
     ref_image_asset_ids: list[str | None] | None = None,
+    ref_image_labels: list[str] | None = None,
     ref_video_asset_ids: list[str | None] | None = None,
     strip_audio: bool = False,
     previous_interaction_id: str | None = None,
@@ -385,6 +418,7 @@ def generate_omni_video(
         has_last_frame=has_last,
         same_loop_frame=same_loop,
         ref_image_count=len(ref_imgs),
+        ref_image_labels=(ref_image_labels[:MAX_REFERENCE_IMAGES] if ref_image_labels else None),
         has_source_video=bool(has_source_vid or previous_interaction_id),
     )
     input_parts.append({"type": "text", "text": final_prompt})

@@ -66,9 +66,9 @@ def _save_split_episodes(
 
     created: list[Episode] = []
     for i, ch in enumerate(chunks):
-        # Heuristic default shot count based on episode text length (4 to 12 shots)
+        # Heuristic default shot count for single-beat AI video pacing (~130 chars/shot, 6 to 30 shots)
         length = len(ch["source_text"])
-        auto_shots = max(4, min(12, round(length / 300)))
+        auto_shots = max(6, min(30, round(length / 130)))
         ep = Episode(
             project_id=proj.id,
             order_index=start_idx + i,
@@ -119,7 +119,7 @@ async def import_novel_file(
     project_id: str,
     file: UploadFile = File(...),
     split_mode: str = Form("auto_chapter"),
-    chars_per_episode: int = Form(2000),
+    chars_per_episode: int = Form(1200),
     replace_existing: bool = Form(True),
     db: Session = Depends(get_db),
 ):
@@ -326,6 +326,10 @@ async def run_episode_breakdown(
 
             for offset, s_spec in enumerate(shots_spec):
                 matched_ids = [name_to_id[n] for n in (s_spec.get("asset_names") or []) if n in name_to_id]
+                raw_dialogue = str(s_spec.get("dialogue") or "")
+                raw_mode = str(s_spec.get("dialogue_mode") or "").strip().lower()
+                if raw_mode not in ("spoken", "narration", "none"):
+                    raw_mode = "spoken" if raw_dialogue.strip() else "none"
                 session.add(
                     Shot(
                         project_id=project_id,
@@ -336,9 +340,10 @@ async def run_episode_breakdown(
                         camera_movement=str(s_spec.get("camera_movement") or "缓慢推进"),
                         visual_prompt_zh=str(s_spec.get("visual_prompt_zh") or ""),
                         video_prompt_en=str(s_spec.get("video_prompt_en") or ""),
-                        dialogue=str(s_spec.get("dialogue") or ""),
+                        dialogue=raw_dialogue,
+                        dialogue_mode=raw_mode,
                         sfx_prompt=str(s_spec.get("sfx_prompt") or ""),
-                        duration_sec=int(s_spec.get("duration_sec") or 6),
+                        duration_sec=int(s_spec.get("duration_sec") or 5),
                         asset_ids_json=json.dumps(matched_ids),
                     )
                 )

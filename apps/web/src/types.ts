@@ -1,5 +1,6 @@
 export type AppMode = "auto" | "live" | "demo";
 export type ImageProvider = "gemini" | "openai_assets" | "openai_all";
+export type DialogueMode = "spoken" | "narration" | "none";
 export type VideoEngine = "omni_flash";
 export type VideoResolution = "360p" | "720p" | "1080p" | "4k";
 
@@ -110,6 +111,7 @@ export interface Take {
   mode: string;
   qa_score: number | null;
   qa_feedback: string | null;
+  qa_improved_prompt?: string | null;
   cost_usd: number;
   created_at: string;
 }
@@ -125,6 +127,7 @@ export interface Shot {
   visual_prompt_zh: string;
   video_prompt_en: string;
   dialogue: string;
+  dialogue_mode?: DialogueMode;
   sfx_prompt: string;
   duration_sec: number;
   asset_ids: string[];
@@ -152,6 +155,7 @@ export interface DirectorProposal {
     visual_prompt_zh: string;
     video_prompt_en: string;
     dialogue?: string;
+    dialogue_mode?: DialogueMode;
     sfx_prompt?: string;
     duration_sec?: number;
     asset_names?: string[];

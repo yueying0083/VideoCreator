@@ -597,6 +597,7 @@ export default function App() {
                 <StoryboardTab
                   shots={filteredShots}
                   assets={assets}
+                  settings={settings}
                   tasks={tasks}
                   effectiveMode={settings?.effective_mode || "demo"}
                   onCreateShot={() =>
@@ -624,6 +625,29 @@ export default function App() {
                     wrap(async () => {
                       const job = await api.generateKeyframe(currentProject.id, sid, which);
                       setTasks((prev) => [job, ...prev]);
+                    })
+                  }
+                  onClearKeyframe={(sid, which) =>
+                    wrap(async () => {
+                      await api.clearShotKeyframe(currentProject.id, sid, which);
+                      await refreshProjectData(currentProject.id);
+                      showToast(`已清除${which === "start" ? "首帧" : "尾帧"}`);
+                    })
+                  }
+                  onBatchGenerateKeyframes={(payload) =>
+                    wrap(async () => {
+                      const res = await api.batchGenerateKeyframes(currentProject.id, {
+                        ...payload,
+                        episode_id: selectedEpisodeFilter === "all" ? null : selectedEpisodeFilter,
+                      });
+                      if (res.tasks.length > 0) {
+                        setTasks((prev) => [...res.tasks, ...prev]);
+                      }
+                      showToast(
+                        res.submitted_count > 0
+                          ? `已提交 ${res.submitted_count} 个首帧合成任务${res.skipped_count > 0 ? `（跳过 ${res.skipped_count} 个已有首帧镜头）` : ""}`
+                          : `当前分镜均已有首帧（跳过 ${res.skipped_count} 个镜头）`
+                      );
                     })
                   }
                   onCopyPrevEndFrame={(sid) =>

@@ -21,17 +21,29 @@ import {
   Wand2,
 } from "lucide-react";
 import { VIDEO_ENGINE_OPTIONS, estimateVideoUsd } from "../types";
-import type { Asset, JobTask, Shot, StudioDraftInjection, VideoEngine, VideoResolution } from "../types";
+import type {
+  Asset,
+  DialogueMode,
+  JobTask,
+  Settings,
+  Shot,
+  StudioDraftInjection,
+  VideoEngine,
+  VideoResolution,
+} from "../types";
 
 interface StoryboardTabProps {
   shots: Shot[];
   assets: Asset[];
+  settings?: Settings | null;
   tasks?: JobTask[];
   effectiveMode: "live" | "demo";
   onCreateShot: () => Promise<void>;
   onUpdateShot: (shotId: string, patch: Partial<Shot>) => Promise<void>;
   onDeleteShot: (shotId: string) => Promise<void>;
   onGenerateKeyframe: (shotId: string, which: "start" | "end") => Promise<void>;
+  onClearKeyframe: (shotId: string, which: "start" | "end") => Promise<void>;
+  onBatchGenerateKeyframes: (payload: { which: "start" | "end"; only_missing: boolean }) => Promise<void>;
   onCopyPrevEndFrame: (shotId: string) => Promise<void>;
   onGenerateVideo: (
     shotId: string,
@@ -41,6 +53,7 @@ interface StoryboardTabProps {
       resolution: VideoResolution;
       with_audio: boolean;
       use_end_frame: boolean;
+      use_asset_refs_with_start_frame: boolean;
     }
   ) => Promise<void>;
   onBatchGenerate: (payload: {
@@ -48,6 +61,7 @@ interface StoryboardTabProps {
     resolution: VideoResolution;
     with_audio: boolean;
     use_end_frame: boolean;
+    use_asset_refs_with_start_frame: boolean;
     only_pending: boolean;
     chain_last_frame: boolean;
   }) => Promise<void>;
@@ -77,12 +91,15 @@ const OMNI_DURATIONS = [3, 4, 5, 6, 8, 10, 12, 15];
 export const StoryboardTab: React.FC<StoryboardTabProps> = ({
   shots,
   assets,
+  settings,
   tasks = [],
   effectiveMode,
   onCreateShot,
   onUpdateShot,
   onDeleteShot,
   onGenerateKeyframe,
+  onClearKeyframe,
+  onBatchGenerateKeyframes,
   onCopyPrevEndFrame,
   onGenerateVideo,
   onBatchGenerate,
@@ -98,8 +115,14 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
   const [resolution, setResolution] = useState<VideoResolution>("720p");
   const [withAudio, setWithAudio] = useState(true);
   const [useEndFrame, setUseEndFrame] = useState(false);
-  const [chainLastFrame, setChainLastFrame] = useState(true);
+  const [useRefsWithStartFrame, setUseRefsWithStartFrame] = useState(false);
+  const [chainLastFrame, setChainLastFrame] = useState(false);
   const [enhancingShotId, setEnhancingShotId] = useState<string | null>(null);
+
+  const keyframeEngineLabel =
+    settings?.image_provider === "openai_all"
+      ? `GPT (${settings?.openai_image_model || "gpt-image-1"})`
+      : `Gemini (${settings?.image_model || "gemini-nano-banana-2.1"})`;
 
   // Per-take inline Edit/Extend panel state
   const [iteratePanel, setIteratePanel] = useState<{
@@ -147,6 +170,7 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
       resolution,
       with_audio: withAudio,
       use_end_frame: useEndFrame && Boolean(shot.end_frame_url),
+      use_asset_refs_with_start_frame: useRefsWithStartFrame,
     });
   };
 
@@ -156,12 +180,17 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
       onToast("当前分镜均已有视频 Take（如需重拍请点击单镜生成或删除旧 Take）。");
       return;
     }
+    const missingStartCount = pendingShots.filter((s) => !s.start_frame_url).length;
     const estTotal = pendingShots
       .reduce((acc, s) => acc + Number(estimateVideoUsd(engine, s.duration_sec, resolution)), 0)
       .toFixed(2);
     if (effectiveMode === "live") {
+      const missingNote =
+        missingStartCount > 0 && !chainLastFrame
+          ? `\n提示：有 ${missingStartCount} 个镜头尚未合成首帧，建议先点「一键合成首帧」定好画面再拍片。`
+          : "";
       const ok = confirm(
-        `确认批量拍摄 ${pendingShots.length} 个待拍镜头（${chainLastFrame ? "尾帧自动接力顺序拍" : "高速并行拍"} · ${engine} ${resolution}）？\n预估总消耗约 $${estTotal} USD。`
+        `确认批量拍摄 ${pendingShots.length} 个待拍镜头（${chainLastFrame ? "尾帧自动接力顺序拍" : "高速并行拍"} · ${engine} ${resolution}）？\n预估总消耗约 $${estTotal} USD。${missingNote}`
       );
       if (!ok) return;
     }
@@ -170,6 +199,7 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
       resolution,
       with_audio: withAudio,
       use_end_frame: useEndFrame,
+      use_asset_refs_with_start_frame: useRefsWithStartFrame,
       only_pending: true,
       chain_last_frame: chainLastFrame,
     });
@@ -211,27 +241,37 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
           </button>
 
           {shots.length > 0 && (
-            <div className="flex items-center gap-2 rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-2.5 py-1">
-              <label
-                className="flex cursor-pointer items-center gap-1.5 text-[11px] text-indigo-200"
-                title="开启后按顺序自动抽取上一镜尾帧作为下一镜首帧，保证动作连贯"
-              >
-                <input
-                  type="checkbox"
-                  checked={chainLastFrame}
-                  onChange={(e) => setChainLastFrame(e.target.checked)}
-                  className="rounded border-studio-border bg-studio-bg text-indigo-500"
-                />
-                尾帧接力
-              </label>
+            <>
               <button
-                className="studio-btn-primary py-1 text-[11px]"
-                onClick={handleBatchShoot}
+                className="studio-btn-secondary py-1 text-[11px]"
+                onClick={() => onBatchGenerateKeyframes({ which: "start", only_missing: true })}
+                title={`使用 ${keyframeEngineLabel} 为所有缺少首帧的镜头批量合成单张干净首帧`}
               >
-                <Rocket className="h-3 w-3" />
-                一键批量拍片
+                <Sparkles className="h-3 w-3 text-emerald-400" />
+                一键合成首帧 ({keyframeEngineLabel})
               </button>
-            </div>
+              <div className="flex items-center gap-2 rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-2.5 py-1">
+                <label
+                  className="flex cursor-pointer items-center gap-1.5 text-[11px] text-indigo-200"
+                  title="仅适用于同一场景连续动作；跨场景切换请保持关闭，以免把上一镜尾帧误用作下一镜首帧"
+                >
+                  <input
+                    type="checkbox"
+                    checked={chainLastFrame}
+                    onChange={(e) => setChainLastFrame(e.target.checked)}
+                    className="rounded border-studio-border bg-studio-bg text-indigo-500"
+                  />
+                  尾帧接力(仅同场景)
+                </label>
+                <button
+                  className="studio-btn-primary py-1 text-[11px]"
+                  onClick={handleBatchShoot}
+                >
+                  <Rocket className="h-3 w-3" />
+                  一键批量拍片
+                </button>
+              </div>
+            </>
           )}
         </div>
 
@@ -285,6 +325,19 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
               className="rounded border-studio-border bg-studio-bg text-indigo-500"
             />
             启用首尾帧过渡
+          </label>
+
+          <label
+            className="flex cursor-pointer items-center gap-1.5 text-slate-300"
+            title="默认关闭：已合成首帧时仅传首帧做 I2V，避免多参考图打架串脸"
+          >
+            <input
+              type="checkbox"
+              checked={useRefsWithStartFrame}
+              onChange={(e) => setUseRefsWithStartFrame(e.target.checked)}
+              className="rounded border-studio-border bg-studio-bg text-indigo-500"
+            />
+            首帧同时附带资产图
           </label>
         </div>
       </div>
@@ -566,13 +619,32 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
                       />
                     </div>
 
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                       <div>
-                        <label className="mb-1 block text-[11px] text-slate-400">对白 / 旁白（可转字幕）</label>
+                        <div className="mb-1 flex items-center justify-between gap-1">
+                          <label className="text-[11px] text-slate-400">台词 / 旁白（可转字幕）</label>
+                          <select
+                            className="rounded border border-studio-border bg-studio-bg px-1.5 py-0.5 text-[10px] text-slate-200"
+                            value={shot.dialogue_mode || "spoken"}
+                            onChange={(e) =>
+                              onUpdateShot(shot.id, { dialogue_mode: e.target.value as DialogueMode })
+                            }
+                            title="决定拍视频时是否让角色开口念出此台词"
+                          >
+                            <option value="spoken">角色开口说</option>
+                            <option value="narration">仅字幕/旁白(不对口型)</option>
+                            <option value="none">无对白</option>
+                          </select>
+                        </div>
                         <input
                           className="studio-input text-xs"
                           defaultValue={shot.dialogue}
-                          placeholder="留空则无对白"
+                          key={shot.id + "_dlg_" + shot.dialogue}
+                          placeholder={
+                            (shot.dialogue_mode || "spoken") === "narration"
+                              ? "旁白字幕（视频中角色不张嘴）"
+                              : "角色短台词（建议 ≤12字）"
+                          }
                           onBlur={(e) => {
                             if (e.target.value !== shot.dialogue) {
                               onUpdateShot(shot.id, { dialogue: e.target.value });
@@ -585,6 +657,7 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
                         <input
                           className="studio-input text-xs"
                           defaultValue={shot.sfx_prompt}
+                          key={shot.id + "_sfx_" + shot.sfx_prompt}
                           placeholder="如：细雨声、脚步声"
                           onBlur={(e) => {
                             if (e.target.value !== shot.sfx_prompt) {
@@ -613,6 +686,16 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
                           <span className="absolute left-1.5 top-1.5 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-slate-200">
                             首帧
                           </span>
+                          {shot.start_frame_url && (
+                            <button
+                              type="button"
+                              onClick={() => onClearKeyframe(shot.id, "start")}
+                              className="absolute right-1.5 top-1.5 rounded bg-black/75 px-1.5 py-0.5 text-[10px] text-slate-300 hover:bg-rose-600 hover:text-white"
+                              title="清除首帧"
+                            >
+                              ×
+                            </button>
+                          )}
                         </div>
                         <div className="flex gap-1">
                           <button
@@ -647,6 +730,16 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
                           <span className="absolute left-1.5 top-1.5 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-slate-200">
                             尾帧
                           </span>
+                          {shot.end_frame_url && (
+                            <button
+                              type="button"
+                              onClick={() => onClearKeyframe(shot.id, "end")}
+                              className="absolute right-1.5 top-1.5 rounded bg-black/75 px-1.5 py-0.5 text-[10px] text-slate-300 hover:bg-rose-600 hover:text-white"
+                              title="清除尾帧"
+                            >
+                              ×
+                            </button>
+                          )}
                         </div>
                         <button
                           className="studio-btn-secondary w-full py-1 text-[11px]"
@@ -771,7 +864,7 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
                                 placeholder={
                                   iteratePanel.action === "extend"
                                     ? "输入续写剧情（例如：Extend this video: the character turns and walks toward the neon doorway.）"
-                                    : "输入修改指令（例如：Change lighting to golden sunset, keep everything else the same.）"
+                                    : "输入简短单一的英文修改指令，结尾加 Keep everything else the same.（切勿粘贴整段中文审片批评；若要去掉人声/旁白请勾选下方“剥离原声重配”）"
                                 }
                               />
                               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -831,15 +924,42 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
                             </div>
                           )}
 
-                          {selectedTake.qa_feedback && (
-                            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2 text-[11px] leading-relaxed text-amber-200">
-                              <div className="mb-0.5 flex items-center gap-1 font-semibold">
-                                <Star className="h-3 w-3 fill-amber-400 text-amber-400" />
-                                AI 审片评分：{selectedTake.qa_score}/10
+                          {selectedTake.qa_feedback && (() => {
+                            const legacyPrefix = "优化建议 Prompt：";
+                            const rawFb = selectedTake.qa_feedback || "";
+                            const splitIdx = rawFb.indexOf(legacyPrefix);
+                            const cleanFeedback = splitIdx >= 0 ? rawFb.slice(0, splitIdx).trim() : rawFb;
+                            const improvedPrompt =
+                              (selectedTake.qa_improved_prompt || "").trim() ||
+                              (splitIdx >= 0 ? rawFb.slice(splitIdx + legacyPrefix.length).trim() : "");
+                            return (
+                              <div className="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 text-[11px] leading-relaxed text-amber-200">
+                                <div className="flex items-center gap-1 font-semibold">
+                                  <Star className="h-3 w-3 fill-amber-400 text-amber-400" />
+                                  AI 审片评分：{selectedTake.qa_score}/10
+                                </div>
+                                <div className="whitespace-pre-wrap">{cleanFeedback}</div>
+                                {improvedPrompt && (
+                                  <div className="rounded border border-amber-500/25 bg-black/30 p-2">
+                                    <div className="mb-1 flex items-center justify-between gap-2">
+                                      <span className="font-semibold text-amber-300">建议重拍英文提示词：</span>
+                                      <button
+                                        type="button"
+                                        className="rounded bg-amber-500/20 px-2 py-0.5 text-[10px] font-medium text-amber-200 hover:bg-amber-500/35"
+                                        onClick={async () => {
+                                          await onUpdateShot(shot.id, { video_prompt_en: improvedPrompt });
+                                          onToast("已应用审片优化提示词到本镜！可直接点击「生成视频」重拍。");
+                                        }}
+                                      >
+                                        应用到本镜英文提示词（准备重拍）
+                                      </button>
+                                    </div>
+                                    <div className="font-mono text-[10px] text-slate-200">{improvedPrompt}</div>
+                                  </div>
+                                )}
                               </div>
-                              <div className="whitespace-pre-wrap">{selectedTake.qa_feedback}</div>
-                            </div>
-                          )}
+                            );
+                          })()}
                         </div>
                       ) : (
                         <div className="flex h-28 flex-col items-center justify-center gap-1 text-xs text-slate-500">

@@ -57,7 +57,7 @@ export const NovelTab: React.FC<NovelTabProps> = ({
   onOpenEpisodeStoryboard,
 }) => {
   const [splitMode, setSplitMode] = useState<"auto_chapter" | "by_length">("auto_chapter");
-  const [charsPerEp, setCharsPerEp] = useState(2000);
+  const [charsPerEp, setCharsPerEp] = useState(1200);
   const [replaceExisting, setReplaceExisting] = useState(true);
   const [pasteMode, setPasteMode] = useState(false);
   const [novelTitle, setNovelTitle] = useState(project.novel_title || "未命名小说");
@@ -310,11 +310,14 @@ export const NovelTab: React.FC<NovelTabProps> = ({
                     <input
                       type="number"
                       min={2}
-                      max={24}
+                      max={40}
                       className="w-16 rounded border border-studio-border bg-studio-bg px-2 py-1 font-mono text-xs text-white"
                       value={shotCountDraft}
-                      onChange={(e) => setShotCountDraft(Number(e.target.value) || 6)}
+                      onChange={(e) => setShotCountDraft(Number(e.target.value) || 10)}
                     />
+                    <span className="hidden text-[11px] text-slate-500 sm:inline">
+                      (建议每 100~150 字拆 1 镜，单镜 4~6s 只做一件事)
+                    </span>
                   </div>
                   <button
                     className="studio-btn-primary"

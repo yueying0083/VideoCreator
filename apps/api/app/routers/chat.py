@@ -159,6 +159,10 @@ def apply_director_proposal(project_id: str, message_id: str, db: Session = Depe
         for offset, s_spec in enumerate(shots_spec):
             asset_names = s_spec.get("asset_names") or []
             matched_ids = [existing_assets[n].id for n in asset_names if n in existing_assets]
+            raw_dialogue = str(s_spec.get("dialogue") or "")
+            raw_mode = str(s_spec.get("dialogue_mode") or "").strip().lower()
+            if raw_mode not in ("spoken", "narration", "none"):
+                raw_mode = "spoken" if raw_dialogue.strip() else "none"
             shot = Shot(
                 project_id=project_id,
                 order_index=start_idx + offset,
@@ -167,7 +171,8 @@ def apply_director_proposal(project_id: str, message_id: str, db: Session = Depe
                 camera_movement=str(s_spec.get("camera_movement") or "缓慢推进"),
                 visual_prompt_zh=str(s_spec.get("visual_prompt_zh") or ""),
                 video_prompt_en=str(s_spec.get("video_prompt_en") or ""),
-                dialogue=str(s_spec.get("dialogue") or ""),
+                dialogue=raw_dialogue,
+                dialogue_mode=raw_mode,
                 sfx_prompt=str(s_spec.get("sfx_prompt") or ""),
                 duration_sec=int(s_spec.get("duration_sec") or 6),
                 asset_ids_json=json.dumps(matched_ids),

@@ -121,6 +121,7 @@ class Shot(Base):
     visual_prompt_zh: Mapped[str] = mapped_column(Text, default="")
     video_prompt_en: Mapped[str] = mapped_column(Text, default="")
     dialogue: Mapped[str] = mapped_column(Text, default="")
+    dialogue_mode: Mapped[str] = mapped_column(String(16), default="spoken")  # spoken | narration | none
     sfx_prompt: Mapped[str] = mapped_column(Text, default="")
     duration_sec: Mapped[int] = mapped_column(Integer, default=6)
     asset_ids_json: Mapped[str] = mapped_column(Text, default="[]")
@@ -155,6 +156,7 @@ class Take(Base):
     mode: Mapped[str] = mapped_column(String(32), default="generate")  # generate | edit | extend | flow_import
     qa_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     qa_feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
+    qa_improved_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
@@ -310,6 +312,7 @@ def init_db() -> None:
     with engine.begin() as conn:
         _add_column_if_missing(conn, insp, "projects", "novel_title", "VARCHAR(200) DEFAULT ''")
         _add_column_if_missing(conn, insp, "shots", "episode_id", "VARCHAR(32)")
+        _add_column_if_missing(conn, insp, "shots", "dialogue_mode", "VARCHAR(16) DEFAULT 'spoken'")
 
         _add_column_if_missing(conn, insp, "assets", "media_type", "VARCHAR(16) DEFAULT 'image'")
         _add_column_if_missing(conn, insp, "assets", "mime_type", "VARCHAR(64) DEFAULT ''")
@@ -327,6 +330,7 @@ def init_db() -> None:
         _add_column_if_missing(conn, insp, "takes", "interaction_id", "VARCHAR(200)")
         _add_column_if_missing(conn, insp, "takes", "parent_take_id", "VARCHAR(32)")
         _add_column_if_missing(conn, insp, "takes", "mode", "VARCHAR(32) DEFAULT 'generate'")
+        _add_column_if_missing(conn, insp, "takes", "qa_improved_prompt", "TEXT")
 
         _add_column_if_missing(conn, insp, "export_records", "crossfade_sec", "FLOAT DEFAULT 0.0")
         _add_column_if_missing(conn, insp, "job_tasks", "asset_id", "VARCHAR(32)")

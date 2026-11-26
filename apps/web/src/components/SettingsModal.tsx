@@ -196,7 +196,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, settings, on
           <div className="space-y-3 rounded-xl border border-studio-border bg-studio-card p-4">
             <div className="flex items-center justify-between">
               <div className="text-xs font-semibold uppercase tracking-wider text-indigo-400">
-                1. Gemini API（导演 / Omni 1.2 视频 / 关键帧 / 配乐）
+                1. Gemini API（导演/拆镜/审片 · Omni 1.2 视频 · Lyria 3.5 配乐）
               </div>
               <button
                 type="button"
@@ -248,7 +248,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, settings, on
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-emerald-400">
                 <ImageIcon className="h-3.5 w-3.5" />
-                2. GPT / OpenAI 兼容生图（角色定妆照 &amp; 三视图）
+                2. GPT / OpenAI 兼容生图（定妆照 / 三视图 / 分镜首尾帧）
               </div>
               <button
                 type="button"
@@ -272,8 +272,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, settings, on
                 value={imageProvider}
                 onChange={(e) => setImageProvider(e.target.value as ImageProvider)}
               >
-                <option value="openai_assets">定妆照 &amp; 三视图用 GPT，分镜关键帧用 Gemini（推荐）</option>
-                <option value="openai_all">全部生图（定妆照 + 三视图 + 分镜关键帧）均使用 GPT</option>
+                <option value="openai_all">全部生图（定妆照 + 三视图 + 分镜首尾帧）均用 GPT，仅视频/音频用 Gemini（推荐）</option>
+                <option value="openai_assets">定妆照 &amp; 三视图用 GPT，分镜关键帧用 Gemini</option>
                 <option value="gemini">全部生图使用 Gemini（Nano Banana 2.1）</option>
               </select>
             </div>

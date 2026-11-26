@@ -4,6 +4,8 @@ from datetime import datetime
 from typing import Any, Literal
 from pydantic import BaseModel, Field
 
+DialogueMode = Literal["spoken", "narration", "none"]
+
 
 class SettingsOut(BaseModel):
     app_mode: Literal["auto", "live", "demo"]
@@ -129,7 +131,7 @@ class NovelImportTextRequest(BaseModel):
     novel_title: str = "导入小说"
     text: str = Field(min_length=10)
     split_mode: Literal["auto_chapter", "by_length"] = "auto_chapter"
-    chars_per_episode: int = Field(default=2000, ge=300, le=20000)
+    chars_per_episode: int = Field(default=1200, ge=300, le=20000)
     replace_existing: bool = True
 
 
@@ -138,7 +140,7 @@ class ExtractBibleRequest(BaseModel):
 
 
 class EpisodeBreakdownRequest(BaseModel):
-    target_shots: int = Field(default=6, ge=2, le=24)
+    target_shots: int = Field(default=10, ge=2, le=40)
     replace_existing: bool = True
 
 
@@ -219,6 +221,7 @@ class TakeOut(BaseModel):
     mode: str = "generate"
     qa_score: int | None = None
     qa_feedback: str | None = None
+    qa_improved_prompt: str | None = None
     cost_usd: float
     created_at: datetime
 
@@ -231,6 +234,7 @@ class ShotCreate(BaseModel):
     visual_prompt_zh: str = ""
     video_prompt_en: str = ""
     dialogue: str = ""
+    dialogue_mode: DialogueMode = "spoken"
     sfx_prompt: str = ""
     duration_sec: int = 6
     asset_ids: list[str] = Field(default_factory=list)
@@ -245,6 +249,7 @@ class ShotUpdate(BaseModel):
     visual_prompt_zh: str | None = None
     video_prompt_en: str | None = None
     dialogue: str | None = None
+    dialogue_mode: DialogueMode | None = None
     sfx_prompt: str | None = None
     duration_sec: int | None = None
     asset_ids: list[str] | None = None
@@ -264,6 +269,7 @@ class ShotOut(BaseModel):
     visual_prompt_zh: str
     video_prompt_en: str
     dialogue: str
+    dialogue_mode: DialogueMode = "spoken"
     sfx_prompt: str
     duration_sec: int
     asset_ids: list[str] = Field(default_factory=list)
@@ -283,12 +289,25 @@ class KeyframeGenerateRequest(BaseModel):
     prompt_override: str | None = None
 
 
+class BatchGenerateKeyframesRequest(BaseModel):
+    episode_id: str | None = None
+    which: Literal["start", "end"] = "start"
+    only_missing: bool = True
+
+
+class BatchGenerateKeyframesResponse(BaseModel):
+    submitted_count: int
+    skipped_count: int
+    tasks: list["JobTaskOut"] = Field(default_factory=list)
+
+
 class VideoGenerateRequest(BaseModel):
     engine: Literal["omni_flash"] = "omni_flash"
     duration_sec: int = Field(default=6, ge=1, le=15)
     resolution: Literal["360p", "720p", "1080p", "4k"] = "720p"
     with_audio: bool = True
     use_end_frame: bool = False
+    use_asset_refs_with_start_frame: bool = False
     prompt_override_en: str | None = None
 
 
@@ -298,6 +317,7 @@ class BatchGenerateShotsRequest(BaseModel):
     resolution: Literal["360p", "720p", "1080p", "4k"] = "720p"
     with_audio: bool = True
     use_end_frame: bool = False
+    use_asset_refs_with_start_frame: bool = False
     only_pending: bool = True
     chain_last_frame: bool = False
 

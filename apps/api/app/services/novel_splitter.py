@@ -39,8 +39,9 @@ class EpisodeShotItem(BaseModel):
     visual_prompt_zh: str
     video_prompt_en: str
     dialogue: str = ""
+    dialogue_mode: Literal["spoken", "narration", "none"] = "spoken"
     sfx_prompt: str = ""
-    duration_sec: int = Field(default=6, ge=3, le=15)
+    duration_sec: int = Field(default=5, ge=3, le=15)
     asset_names: list[str] = Field(default_factory=list)
 
 
@@ -219,7 +220,7 @@ BOOK_BIBLE_SYSTEM_PROMPT = """你是一位顶级漫剧/影视改编制片人与�
     {
       "name": "简短清晰的角色/场景/关键道具名（不含特殊符号）",
       "kind": "character" 或 "scene" 或 "prop",
-      "description": "极度具体的中文外貌/服装/建筑/材质设定（供 Nano Banana 2 生成定妆照与三视图，确保第1集到第50集外观不跑偏）"
+      "description": "极度具体的中文外貌/服装/建筑/材质设定（供 AI 生图模型绘制单主体定妆照与三视图，确保第1集到第50集外观不跑偏）。重要：每个资产只写一套唯一固定的主要服装与平静神态，不要写“前期穿A、后期穿B”或“在表情A与B之间切换”"
     }
   ],
   "episode_summaries": [
@@ -309,9 +310,21 @@ EPISODE_BREAKDOWN_SYSTEM_PROMPT = """你是一位擅长把网文/小说改编为
 2. 上一集剧情衔接摘要（如有）
 3. 本集小说原文与目标镜头数
 
-请将本集原文改编为极具画面感、节奏紧凑、适合 Veo 3.1 / Gemini Omni 1.2 Flash / Google Flow 生成的连续分镜脚本，严格输出 JSON：
-- 每个镜头的 `video_prompt_en` 遵循 Omni 1.2 Flash 与 Veo 3.1 规范：使用自然语言描述构图、动作、光影与同期声，默认加入 "Continuous, unbroken single shot, no scene cuts"，严禁使用已废弃 XML 标签。
-- `dialogue` 为该镜头内的核心台词或精炼旁白（中文，控制在 18 字内便于 6 秒镜头说完，可留空）。"""
+请严格遵守以下 AI 视频工业级分镜铁律（严禁把多场戏、多动作塞进同一镜），输出 JSON：
+1. **一镜一事（Atomic Single-Beat Rule）**：
+   - 每个镜头默认 4~6 秒（仅纯空镜/慢建立镜头可用 7~8 秒）；
+   - 每个镜头**严格只包含 1 个固定空间/场景、1 个核心主体动作、1 种简单运镜**；
+   - **严禁在同一镜头内**出现室内外跨越（如“在屋内说完再走出门进入走廊”）、时间跳跃、物体瞬移或 2 个以上戏剧转折——必须拆成连续的 2~3 个镜头（例如：镜A 屋内对话 → 镜B 推门背影 → 镜C 门外暗影变脸）！
+2. **单镜资产上限**：每镜 `asset_names` 严格控制在 **1~3 个**当下真正入画的核心资产（通常为 1 个场景 + 1~2 个焦点人物/关键道具），不要把所有出场人都堆在同一个镜头里。
+3. **区分「角色开口说」与「画外旁白/心理」**：
+   - `dialogue_mode`:
+     - `"spoken"`：仅当镜头画面里某位角色明确张嘴说短台词（严格 ≤ 12 个汉字，确保 5 秒内能说完）；
+     - `"narration"`：用于旁白解说、心理活动、环境交代（不让画面中角色开口），此时 `video_prompt_en` 必须明确包含 `"No spoken dialogue, mouth closed, no on-screen subtitles"`；
+     - `"none"`：纯动作或氛围空镜（`dialogue` 留空），`video_prompt_en` 也写 `"No spoken dialogue, no on-screen subtitles"`。
+4. **`video_prompt_en` 规范**：
+   - 必须以 `"Continuous, unbroken single shot, no scene cuts."` 开头；
+   - 先用清晰英文描述 t=0s 开场画面构图（方便 GPT Image 先生成单张干净首帧），再写单一连贯微动作、运镜、光影与纯英文同期环境音；
+   - 严禁使用 `<FIRST_FRAME>`、`<IMAGE_REF_1>` 等已废弃 XML 标签。"""
 
 
 def breakdown_episode_to_shots(
@@ -320,7 +333,7 @@ def breakdown_episode_to_shots(
     prev_summary: str,
     project_style: str,
     assets: list[dict[str, str]],
-    target_shots: int = 6,
+    target_shots: int = 10,
     settings: RuntimeSettings | None = None,
 ) -> tuple[dict[str, Any], str, bool]:
     cfg = settings or load_settings()
@@ -337,6 +350,7 @@ def breakdown_episode_to_shots(
             excerpt = paras[p_idx][:75]
             st = shot_types[i % len(shot_types)]
             cm = cam_moves[i % len(cam_moves)]
+            has_narration = i % 2 == 0
             shots.append(
                 {
                     "title": f"{episode_title} · 镜{i + 1}",
@@ -344,12 +358,13 @@ def breakdown_episode_to_shots(
                     "camera_movement": cm,
                     "visual_prompt_zh": f"【改编自原文】{excerpt}",
                     "video_prompt_en": (
-                        f"Cinematic {st} shot with {cm}, adapting scene from '{episode_title}': "
-                        f"expressive storytelling lighting, rich atmosphere, smooth motion, synchronized ambient audio, 35mm film look"
+                        f"Continuous, unbroken single shot, no scene cuts. Cinematic {st} shot with {cm}, adapting single beat from '{episode_title}': "
+                        f"expressive storytelling lighting, rich atmosphere, smooth motion, synchronized ambient audio, no spoken dialogue, no on-screen subtitles, 35mm film look."
                     ),
-                    "dialogue": excerpt[:22] if i % 2 == 0 else "",
+                    "dialogue": excerpt[:18] if has_narration else "",
+                    "dialogue_mode": "narration" if has_narration else "none",
                     "sfx_prompt": "沉浸式场景环境音、自然动作拟音",
-                    "duration_sec": 6,
+                    "duration_sec": 5,
                     "asset_names": asset_names,
                 }
             )
@@ -365,10 +380,10 @@ def breakdown_episode_to_shots(
     client = create_genai_client(cfg, timeout_seconds=180)
     payload_text = (
         f"全剧画风：{project_style}\n"
-        f"全局资产库（asset_names 必须从以下 name 中精确挑选）：\n"
+        f"全局资产库（asset_names 必须从以下 name 中精确挑选，单镜最多选 1~3 个核心资产）：\n"
         f"{json.dumps(assets, ensure_ascii=False, indent=2)}\n\n"
         f"上一集剧情衔接摘要：{prev_summary or '（本集为开篇第一集）'}\n"
-        f"目标分镜数：约 {target_shots} 个镜头（每镜 4~8 秒，推荐 6 秒）\n\n"
+        f"目标分镜数：约 {target_shots} 个镜头（每镜 4~6 秒，一镜一事单场景单动作，绝不在一镜内跨场景转场）\n\n"
         f"=== 本集标题：{episode_title} ===\n"
         f"{episode_text[:30000]}"
     )

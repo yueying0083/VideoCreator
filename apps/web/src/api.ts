@@ -210,12 +210,29 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ which, prompt_override }),
     }),
+  clearShotKeyframe: (pid: string, sid: string, which: "start" | "end") =>
+    req<Shot>(`/api/projects/${pid}/shots/${sid}/keyframe/${which}`, { method: "DELETE" }),
+  batchGenerateKeyframes: (
+    pid: string,
+    payload: { episode_id?: string | null; which?: "start" | "end"; only_missing?: boolean }
+  ) =>
+    req<{ submitted_count: number; skipped_count: number; tasks: JobTask[] }>(
+      `/api/projects/${pid}/shots/batch-keyframes`,
+      { method: "POST", body: JSON.stringify(payload) }
+    ),
   copyPrevShotEndFrame: (pid: string, sid: string) =>
     req<Shot>(`/api/projects/${pid}/shots/${sid}/keyframe/from-prev-end`, { method: "POST" }),
   generateVideo: (
     pid: string,
     sid: string,
-    payload: { engine: VideoEngine; duration_sec: number; resolution?: VideoResolution; with_audio: boolean; use_end_frame: boolean }
+    payload: {
+      engine: VideoEngine;
+      duration_sec: number;
+      resolution?: VideoResolution;
+      with_audio: boolean;
+      use_end_frame: boolean;
+      use_asset_refs_with_start_frame?: boolean;
+    }
   ) =>
     req<JobTask>(`/api/projects/${pid}/shots/${sid}/video/generate`, {
       method: "POST",
@@ -229,6 +246,7 @@ export const api = {
       resolution: VideoResolution;
       with_audio: boolean;
       use_end_frame: boolean;
+      use_asset_refs_with_start_frame?: boolean;
       only_pending: boolean;
       chain_last_frame: boolean;
     }

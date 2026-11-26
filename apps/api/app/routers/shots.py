@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from app.config import COST_RATES, estimate_video_cost, load_settings
 from app.database import Asset, Project, SessionLocal, Shot, Take, get_db
 from app.schemas import (
+    BatchGenerateKeyframesRequest,
+    BatchGenerateKeyframesResponse,
     BatchGenerateShotsRequest,
     IterateTakeRequest,
     JobTaskOut,
@@ -21,6 +24,7 @@ from app.schemas import (
 )
 from app.services.google_ai import generate_image, generate_video, review_video_qa
 from app.services.media_renderer import extract_frame, extract_video_frame, probe_media_info
+from app.services.omni_engine import MAX_REFERENCE_IMAGES
 from app.services.storage import allocate_rel_path, resolve_abs_path, to_media_url
 from app.services.task_runner import create_job_record, record_cost, submit_background_job
 
@@ -45,6 +49,7 @@ def serialize_take(t: Take) -> TakeOut:
         mode=getattr(t, "mode", "generate") or "generate",
         qa_score=t.qa_score,
         qa_feedback=t.qa_feedback,
+        qa_improved_prompt=getattr(t, "qa_improved_prompt", None),
         cost_usd=t.cost_usd,
         created_at=t.created_at,
     )
@@ -68,6 +73,7 @@ def serialize_shot(s: Shot) -> ShotOut:
         visual_prompt_zh=s.visual_prompt_zh,
         video_prompt_en=s.video_prompt_en,
         dialogue=s.dialogue,
+        dialogue_mode=getattr(s, "dialogue_mode", "spoken") or "spoken",
         sfx_prompt=s.sfx_prompt,
         duration_sec=s.duration_sec,
         asset_ids=asset_ids,
@@ -111,6 +117,7 @@ def create_shot(project_id: str, payload: ShotCreate, db: Session = Depends(get_
         visual_prompt_zh=payload.visual_prompt_zh,
         video_prompt_en=payload.video_prompt_en,
         dialogue=payload.dialogue,
+        dialogue_mode=payload.dialogue_mode,
         sfx_prompt=payload.sfx_prompt,
         duration_sec=payload.duration_sec,
         asset_ids_json=json.dumps(payload.asset_ids),
@@ -161,6 +168,128 @@ def reorder_shots(project_id: str, shot_ids: list[str], db: Session = Depends(ge
     return {"ok": True}
 
 
+def _enqueue_shot_keyframe(
+    proj: Project,
+    shot: Shot,
+    which: Literal["start", "end"],
+    prompt_override: str | None = None,
+    db: Session | None = None,
+) -> JobTaskOut:
+    try:
+        asset_ids = json.loads(shot.asset_ids_json or "[]")
+    except Exception:
+        asset_ids = []
+
+    assets: list[Asset] = []
+    if asset_ids and db is not None:
+        raw_assets = db.query(Asset).filter(Asset.id.in_(asset_ids)).all()
+        by_id = {a.id: a for a in raw_assets}
+        assets = [by_id[aid] for aid in asset_ids if aid in by_id]
+
+    ref_paths: list[Path] = []
+    asset_notes: list[str] = []
+    text_only_notes: list[str] = []
+    for a in assets:
+        if (a.media_type or "image") != "image":
+            continue
+        rp = resolve_abs_path(a.file_path)
+        if rp and rp.exists() and len(ref_paths) < MAX_REFERENCE_IMAGES:
+            ref_paths.append(rp)
+            asset_notes.append(f"Image {len(ref_paths)} [{a.kind}] {a.name}: {a.description}")
+        else:
+            text_only_notes.append(f"[{a.kind}] {a.name}: {a.description}")
+
+    which_label = "首帧" if which == "start" else "尾帧"
+    est_cost = COST_RATES["image"]
+    project_id = proj.id
+    shot_id = shot.id
+    shot_title = shot.title
+    aspect_ratio = proj.aspect_ratio
+
+    job = create_job_record(
+        project_id=project_id,
+        shot_id=shot_id,
+        kind="keyframe",
+        message=f"正在合成「{shot_title}」{which_label}关键帧（融合 {len(ref_paths)} 个参考资产）...",
+        estimated_cost_usd=est_cost,
+    )
+
+    frame_role = "exact opening start frame (t=0s)" if which == "start" else "closing end frame"
+    all_notes = asset_notes + text_only_notes
+    prompt = (prompt_override or "").strip() or (
+        f"Cinematic film still depicting the {frame_role} of shot '{shot_title}'. "
+        f"Shot framing: {shot.shot_type}, Camera: {shot.camera_movement}. "
+        f"Scene visual: {shot.video_prompt_en or shot.visual_prompt_zh}. "
+        f"Referenced visual assets to keep strictly consistent: {'; '.join(all_notes) if all_notes else 'N/A'}. "
+        f"Attached reference images may contain studio portraits or reference sheets; extract only the character's identity/costume or environment architecture into ONE unified live-action/cinematic scene. "
+        f"Global film style: {proj.style_prompt}. "
+        f"STRICTLY ONE single full-bleed cinematic film frame, NO collage, NO grid, NO multi-panel comic layout, NO split screen, NO borders, NO turnaround sheet, NO text or subtitles."
+    )
+
+    def _worker(progress_cb):
+        cfg = load_settings()
+        provider_label = f"GPT ({cfg.openai_image_model})" if cfg.use_openai_for("keyframe") else "Nano Banana 2.1"
+        progress_cb(30, f"调用 {provider_label} 合成{which_label}...")
+        rel_path, abs_path = allocate_rel_path(project_id, "frames", "png", prefix=f"shot_{shot_id}_{which}")
+        _, model_used, is_demo = generate_image(
+            prompt=prompt,
+            output_path=abs_path,
+            aspect_ratio=aspect_ratio,
+            reference_image_paths=ref_paths,
+            badge_title=f"{shot_title} · {which_label}",
+            purpose="keyframe",
+            on_progress=progress_cb,
+        )
+        session = SessionLocal()
+        try:
+            s = session.get(Shot, shot_id)
+            if s:
+                if which == "start":
+                    s.start_frame_path = rel_path
+                else:
+                    s.end_frame_path = rel_path
+                session.commit()
+        finally:
+            session.close()
+        record_cost(project_id, job.id, "keyframe", model_used, est_cost, is_demo, f"{shot_title} {which_label}")
+        return {"shot_id": shot_id, "which": which, "url": to_media_url(rel_path), "is_demo": is_demo}
+
+    submit_background_job(job.id, _worker, use_image_pool=True)
+    return _job_to_out(job)
+
+
+@router.post("/batch-keyframes", response_model=BatchGenerateKeyframesResponse)
+async def batch_generate_keyframes(
+    project_id: str,
+    payload: BatchGenerateKeyframesRequest,
+    db: Session = Depends(get_db),
+):
+    """Batch generate start or end keyframes for storyboard shots using the configured image engine."""
+    proj = db.get(Project, project_id)
+    if not proj:
+        raise HTTPException(status_code=404, detail="项目不存在")
+
+    q = db.query(Shot).filter(Shot.project_id == project_id)
+    if payload.episode_id:
+        q = q.filter(Shot.episode_id == payload.episode_id)
+    shots = q.order_by(Shot.order_index.asc(), Shot.created_at.asc()).all()
+
+    tasks: list[JobTaskOut] = []
+    skipped = 0
+    for s in shots:
+        existing_path = s.start_frame_path if payload.which == "start" else s.end_frame_path
+        if existing_path and payload.only_missing:
+            skipped += 1
+            continue
+        tasks.append(_enqueue_shot_keyframe(proj, s, payload.which, db=db))
+
+    return BatchGenerateKeyframesResponse(
+        submitted_count=len(tasks),
+        skipped_count=skipped,
+        tasks=tasks,
+    )
+
+
 @router.post("/{shot_id}/keyframe/generate", response_model=JobTaskOut)
 async def generate_shot_keyframe(
     project_id: str,
@@ -172,69 +301,26 @@ async def generate_shot_keyframe(
     shot = db.query(Shot).filter(Shot.id == shot_id, Shot.project_id == project_id).first()
     if not proj or not shot:
         raise HTTPException(status_code=404, detail="项目或镜头不存在")
+    return _enqueue_shot_keyframe(proj, shot, payload.which, prompt_override=payload.prompt_override, db=db)
 
-    try:
-        asset_ids = json.loads(shot.asset_ids_json or "[]")
-    except Exception:
-        asset_ids = []
-    assets = db.query(Asset).filter(Asset.id.in_(asset_ids)).all() if asset_ids else []
-    ref_paths: list[Path] = []
-    asset_notes: list[str] = []
-    for a in assets:
-        asset_notes.append(f"[{a.kind}] {a.name}: {a.description}")
-        rp = resolve_abs_path(a.file_path)
-        if rp and rp.exists():
-            ref_paths.append(rp)
 
-    which_label = "首帧" if payload.which == "start" else "尾帧"
-    est_cost = COST_RATES["image"]
-    job = create_job_record(
-        project_id=project_id,
-        shot_id=shot_id,
-        kind="keyframe",
-        message=f"正在合成「{shot.title}」{which_label}关键帧（融合 {len(ref_paths)} 个参考资产）...",
-        estimated_cost_usd=est_cost,
-    )
-
-    frame_role = "opening start frame" if payload.which == "start" else "closing end frame"
-    prompt = (payload.prompt_override or "").strip() or (
-        f"Cinematic film still for the {frame_role} of shot '{shot.title}'. "
-        f"Shot framing: {shot.shot_type}, Camera: {shot.camera_movement}. "
-        f"Scene description: {shot.video_prompt_en or shot.visual_prompt_zh}. "
-        f"Referenced visual assets to keep strictly consistent: {'; '.join(asset_notes) if asset_notes else 'N/A'}. "
-        f"Global film style: {proj.style_prompt}. Single full-bleed film frame, no split screen, no text overlay."
-    )
-
-    def _worker(progress_cb):
-        cfg = load_settings()
-        provider_label = f"GPT ({cfg.openai_image_model})" if cfg.use_openai_for("keyframe") else "Nano Banana 2.1"
-        progress_cb(30, f"调用 {provider_label} 合成{which_label}...")
-        rel_path, abs_path = allocate_rel_path(project_id, "frames", "png", prefix=f"shot_{shot_id}_{payload.which}")
-        _, model_used, is_demo = generate_image(
-            prompt=prompt,
-            output_path=abs_path,
-            aspect_ratio=proj.aspect_ratio,
-            reference_image_paths=ref_paths,
-            badge_title=f"{shot.title} · {which_label}",
-            purpose="keyframe",
-            on_progress=progress_cb,
-        )
-        session = SessionLocal()
-        try:
-            s = session.get(Shot, shot_id)
-            if s:
-                if payload.which == "start":
-                    s.start_frame_path = rel_path
-                else:
-                    s.end_frame_path = rel_path
-                session.commit()
-        finally:
-            session.close()
-        record_cost(project_id, job.id, "keyframe", model_used, est_cost, is_demo, f"{shot.title} {which_label}")
-        return {"shot_id": shot_id, "which": payload.which, "url": to_media_url(rel_path), "is_demo": is_demo}
-
-    submit_background_job(job.id, _worker)
-    return _job_to_out(job)
+@router.delete("/{shot_id}/keyframe/{which}", response_model=ShotOut)
+def clear_shot_keyframe(
+    project_id: str,
+    shot_id: str,
+    which: Literal["start", "end"],
+    db: Session = Depends(get_db),
+):
+    shot = db.query(Shot).filter(Shot.id == shot_id, Shot.project_id == project_id).first()
+    if not shot:
+        raise HTTPException(status_code=404, detail="镜头不存在")
+    if which == "start":
+        shot.start_frame_path = None
+    else:
+        shot.end_frame_path = None
+    db.commit()
+    db.refresh(shot)
+    return serialize_shot(shot)
 
 
 @router.post("/{shot_id}/keyframe/from-prev-end", response_model=ShotOut)
@@ -278,12 +364,27 @@ def copy_prev_shot_last_frame(project_id: str, shot_id: str, db: Session = Depen
     return serialize_shot(curr_shot)
 
 
+def _append_sentence(base: str, extra: str) -> str:
+    clean = (base or "").strip()
+    if not clean:
+        return extra
+    if clean[-1] in ".!?。！？\"”'’":
+        return f"{clean} {extra}"
+    return f"{clean}. {extra}"
+
+
 def _compose_shot_prompt(shot: Shot, with_audio: bool, prompt_override_en: str | None = None) -> str:
-    prompt_en = (prompt_override_en or "").strip() or shot.video_prompt_en or shot.visual_prompt_zh
-    if with_audio and shot.sfx_prompt and shot.sfx_prompt.lower() not in prompt_en.lower():
-        prompt_en = f"{prompt_en}. Synchronized audio & SFX: {shot.sfx_prompt}."
-    if with_audio and shot.dialogue:
-        prompt_en = f'{prompt_en} Spoken dialogue: "{shot.dialogue}".'
+    prompt_en = (prompt_override_en or "").strip() or (shot.video_prompt_en or "").strip() or (shot.visual_prompt_zh or "").strip()
+    d_mode = (getattr(shot, "dialogue_mode", None) or "spoken").strip().lower()
+    if with_audio:
+        sfx = (shot.sfx_prompt or "").strip()
+        if sfx and sfx.lower() not in prompt_en.lower():
+            prompt_en = _append_sentence(prompt_en, f"Synchronized ambient SFX: {sfx}.")
+        dialogue_txt = (shot.dialogue or "").strip()
+        if d_mode == "spoken" and dialogue_txt:
+            prompt_en = _append_sentence(prompt_en, f'Spoken dialogue: "{dialogue_txt}".')
+        elif "no dialogue" not in prompt_en.lower() and "no spoken dialogue" not in prompt_en.lower():
+            prompt_en = _append_sentence(prompt_en, "No spoken dialogue, no voiceover, no on-screen subtitles.")
     return prompt_en
 
 
@@ -297,6 +398,7 @@ def _execute_shot_video_sync(
     resolution: str,
     with_audio: bool,
     use_end_frame: bool,
+    use_asset_refs_with_start_frame: bool = False,
     prompt_override_en: str | None = None,
     progress_cb: Callable[[int, str], None] | None = None,
 ) -> dict[str, Any]:
@@ -308,21 +410,34 @@ def _execute_shot_video_sync(
         if not proj or not shot:
             raise ValueError("项目或镜头不存在")
 
+        start_abs = resolve_abs_path(shot.start_frame_path)
+        end_abs = resolve_abs_path(shot.end_frame_path) if use_end_frame else None
+
         try:
             asset_ids = json.loads(shot.asset_ids_json or "[]")
         except Exception:
             asset_ids = []
-        assets = session.query(Asset).filter(Asset.id.in_(asset_ids)).all() if asset_ids else []
+
         ref_paths: list[Path] = []
         ref_ids: list[str | None] = []
-        for a in assets:
-            rp = resolve_abs_path(a.file_path)
-            if rp and rp.exists() and (a.media_type or "image") == "image":
-                ref_paths.append(rp)
-                ref_ids.append(a.id)
+        ref_labels: list[str] = []
+        if not start_abs or use_asset_refs_with_start_frame:
+            max_refs = (MAX_REFERENCE_IMAGES - (1 if start_abs else 0) - (1 if end_abs else 0))
+            if asset_ids and max_refs > 0:
+                raw_assets = session.query(Asset).filter(Asset.id.in_(asset_ids)).all()
+                by_id = {a.id: a for a in raw_assets}
+                for aid in asset_ids:
+                    a = by_id.get(aid)
+                    if not a or (a.media_type or "image") != "image":
+                        continue
+                    rp = resolve_abs_path(a.file_path)
+                    if rp and rp.exists():
+                        ref_paths.append(rp)
+                        ref_ids.append(a.id)
+                        ref_labels.append(f"{a.kind} '{a.name}'")
+                        if len(ref_paths) >= max_refs:
+                            break
 
-        start_abs = resolve_abs_path(shot.start_frame_path)
-        end_abs = resolve_abs_path(shot.end_frame_path) if use_end_frame else None
         prompt_en = _compose_shot_prompt(shot, with_audio, prompt_override_en)
         aspect_ratio = proj.aspect_ratio
         shot_title = shot.title
@@ -353,6 +468,7 @@ def _execute_shot_video_sync(
         end_frame_path=end_abs,
         reference_image_paths=ref_paths,
         ref_image_asset_ids=ref_ids,
+        ref_image_labels=ref_labels,
         with_audio=with_audio,
         badge_title=shot_title,
         on_progress=progress_cb,
@@ -440,6 +556,7 @@ async def generate_shot_video(
             resolution=payload.resolution,
             with_audio=payload.with_audio,
             use_end_frame=payload.use_end_frame,
+            use_asset_refs_with_start_frame=payload.use_asset_refs_with_start_frame,
             prompt_override_en=payload.prompt_override_en,
             progress_cb=progress_cb,
         )
@@ -492,6 +609,7 @@ async def batch_generate_shots(
                         resolution=payload.resolution,
                         with_audio=payload.with_audio,
                         use_end_frame=payload.use_end_frame,
+                        use_asset_refs_with_start_frame=payload.use_asset_refs_with_start_frame,
                         progress_cb=progress_cb,
                     )
                     return {k: v for k, v in res.items() if k != "abs_vid"}
@@ -532,6 +650,7 @@ async def batch_generate_shots(
                 resolution=payload.resolution,
                 with_audio=payload.with_audio,
                 use_end_frame=payload.use_end_frame,
+                use_asset_refs_with_start_frame=payload.use_asset_refs_with_start_frame,
                 progress_cb=_sub_cb,
             )
             completed_ids.append(res["take_id"])
@@ -557,6 +676,13 @@ async def batch_generate_shots(
     return {"submitted_count": 1, "tasks": [_job_to_out(chain_job)]}
 
 
+_NO_SPEECH_EDIT_RE = re.compile(
+    r"no\s+(?:spoken\s+)?dialogue|without\s+speaking|no\s+voiceover|no\s+speech"
+    r"|remove\s+(?:the\s+)?(?:voice|dialogue|speech)|无对白|不要说话|去掉旁白|去除旁白|去人声|闭嘴",
+    re.IGNORECASE,
+)
+
+
 @router.post("/{shot_id}/takes/{take_id}/iterate", response_model=JobTaskOut)
 async def iterate_shot_take(
     project_id: str,
@@ -577,9 +703,19 @@ async def iterate_shot_take(
 
     cfg = load_settings()
     take_abs = resolve_abs_path(take.file_path)
+    effective_strip_audio = bool(payload.strip_audio)
+    if (
+        payload.action == "edit"
+        and not effective_strip_audio
+        and take_abs
+        and take_abs.exists()
+        and _NO_SPEECH_EDIT_RE.search(payload.prompt)
+    ):
+        effective_strip_audio = True
+
     can_use_interaction = bool(
         take.interaction_id
-        and not payload.strip_audio
+        and not effective_strip_audio
         and (cfg.effective_mode == "demo" or not str(take.interaction_id).startswith("demo_"))
     )
     prev_iid = take.interaction_id if can_use_interaction else None
@@ -590,6 +726,7 @@ async def iterate_shot_take(
 
     ref_imgs: list[Path] = []
     ref_ids: list[str | None] = []
+    ref_labels: list[str] = []
     if payload.ref_asset_ids:
         assets = db.query(Asset).filter(Asset.id.in_(payload.ref_asset_ids[:6]), Asset.project_id == project_id).all()
         for a in assets:
@@ -597,6 +734,7 @@ async def iterate_shot_take(
             if rp and rp.exists() and (a.media_type or "image") == "image":
                 ref_imgs.append(rp)
                 ref_ids.append(a.id)
+                ref_labels.append(f"{a.kind} '{a.name}'")
 
     est_cost = estimate_video_cost("omni_flash", payload.duration_sec, payload.resolution)
     action_label = "续写" if payload.action == "extend" else "多轮改片"
@@ -623,8 +761,9 @@ async def iterate_shot_take(
             source_video_asset_id=None,
             reference_image_paths=ref_imgs,
             ref_image_asset_ids=ref_ids,
-            with_audio=not payload.strip_audio,
-            strip_audio=payload.strip_audio,
+            ref_image_labels=ref_labels,
+            with_audio=not effective_strip_audio,
+            strip_audio=effective_strip_audio,
             previous_interaction_id=prev_iid,
             badge_title=f"{shot.title} · {action_label}",
             on_progress=progress_cb,
@@ -746,12 +885,10 @@ async def run_take_qa_review(
         score = int(qa_data.get("score", 7))
         summary = str(qa_data.get("summary", ""))
         issues = qa_data.get("issues") or []
-        improved = str(qa_data.get("improved_prompt_en", ""))
+        improved = str(qa_data.get("improved_prompt_en", "")).strip()
         feedback_text = summary
         if issues:
             feedback_text += "\n问题点：" + "；".join(str(x) for x in issues)
-        if improved:
-            feedback_text += f"\n优化建议 Prompt：{improved}"
 
         session = SessionLocal()
         try:
@@ -759,6 +896,7 @@ async def run_take_qa_review(
             if t:
                 t.qa_score = max(1, min(10, score))
                 t.qa_feedback = feedback_text
+                t.qa_improved_prompt = improved or None
                 session.commit()
         finally:
             session.close()

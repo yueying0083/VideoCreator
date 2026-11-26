@@ -147,16 +147,19 @@ def load_settings() -> RuntimeSettings:
     except ValueError:
         openai_conc = 2
 
-    img_provider = _get("IMAGE_PROVIDER", "gemini").strip().lower()
-    if img_provider not in ("gemini", "openai_assets", "openai_all"):
-        img_provider = "gemini"
+    openai_key = _get("OPENAI_API_KEY", "").strip()
+    raw_img_provider = _get("IMAGE_PROVIDER", "").strip().lower()
+    if raw_img_provider in ("gemini", "openai_assets", "openai_all"):
+        img_provider = raw_img_provider
+    else:
+        img_provider = "openai_all" if openai_key else "gemini"
 
     return RuntimeSettings(
         app_mode=app_mode,  # type: ignore[arg-type]
         gemini_api_key=_get("GEMINI_API_KEY", "").strip(),
         image_provider=img_provider,  # type: ignore[arg-type]
         openai_base_url=_get("OPENAI_BASE_URL", "https://api.openai.com/v1").strip() or "https://api.openai.com/v1",
-        openai_api_key=_get("OPENAI_API_KEY", "").strip(),
+        openai_api_key=openai_key,
         openai_image_model=_get("OPENAI_IMAGE_MODEL", "gpt-image-1").strip() or "gpt-image-1",
         openai_max_concurrent=openai_conc,
         text_model=_get("TEXT_MODEL", "gemini-4-hydrogen").strip() or "gemini-4-hydrogen",

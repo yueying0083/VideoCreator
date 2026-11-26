@@ -331,10 +331,36 @@ def extract_frame_from_asset(
 
 
 def _build_portrait_prompt(proj: Project, asset: Asset, prompt_override: str | None = None) -> str:
-    return (prompt_override or "").strip() or (
-        f"Create a clean, high-detail reference concept image for a {asset.kind} named '{asset.name}'. "
-        f"Visual description: {asset.description or asset.name}. "
-        f"Overall film visual style: {proj.style_prompt}. Clean studio framing, consistent lighting, no text watermark."
+    override = (prompt_override or "").strip()
+    if override:
+        return override
+
+    desc = asset.description or asset.name
+    if asset.kind == "character":
+        subject_rule = (
+            f"Create ONE single full-bleed medium-full portrait photograph/illustration of ONE single character named '{asset.name}' "
+            f"in their primary canonical outfit against a simple neutral studio backdrop. "
+            f"Strictly ONE character only, NO collage, NO grid, NO multi-panel character sheet, NO expression grid, "
+            f"NO turnaround views, NO inset close-ups, NO split screen, NO borders, NO text, NO watermark."
+        )
+    elif asset.kind == "scene":
+        subject_rule = (
+            f"Create ONE single full-bleed wide establishing shot of the empty location '{asset.name}' "
+            f"with NO people and NO characters in frame. "
+            f"Strictly ONE unified scene only, NO collage, NO grid, NO multi-panel layout, NO inset character portraits, "
+            f"NO split screen, NO borders, NO text, NO watermark."
+        )
+    else:
+        subject_rule = (
+            f"Create ONE single full-bleed studio shot of ONE single prop object '{asset.name}' "
+            f"centered on a clean neutral surface with NO people and NO hands in frame. "
+            f"Strictly ONE unified frame only, NO collage, NO multi-angle grid, NO split screen, NO borders, NO text, NO watermark."
+        )
+
+    return (
+        f"{subject_rule} "
+        f"Visual description: {desc}. "
+        f"Overall film visual style: {proj.style_prompt}."
     )
 
 
