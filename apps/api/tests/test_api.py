@@ -367,6 +367,20 @@ def test_omni_constraints_and_prompt_binding():
     assert "AIzaSySecretKeyValue" not in cleaned
     assert "[REDACTED" in cleaned
 
+    # Ensure google-genai client defaults to v1beta so Omni 1.2 Flash & Lyria 3.5 resolve properly
+    from unittest.mock import patch
+    from app.services.genai_utils import create_genai_client
+
+    captured: dict = {}
+
+    def fake_client(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace()
+
+    with patch("app.services.genai_utils.genai.Client", side_effect=fake_client):
+        create_genai_client(RuntimeSettings(gemini_api_key="AIzaSyDummyKey12345678901234567890"))
+    assert captured["http_options"].api_version == "v1beta"
+
 
 def test_ffmpeg_prep_extract_and_crossfade_export(tmp_path: Path):
     v1 = _make_sample_video(tmp_path / "clip1.mp4", duration=2.0, color="blue", with_audio=True)

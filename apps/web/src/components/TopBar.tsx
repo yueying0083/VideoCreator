@@ -1,5 +1,18 @@
 import React, { useState } from "react";
-import { Clapperboard, FolderPlus, KeyRound, Loader2, LogOut, Settings as SettingsIcon, Sparkles, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  ChevronDown,
+  Clapperboard,
+  FolderPlus,
+  History,
+  KeyRound,
+  Loader2,
+  LogOut,
+  Settings as SettingsIcon,
+  Sparkles,
+  Trash2,
+} from "lucide-react";
 import type { BudgetSummary, JobTask, Project, Settings } from "../types";
 
 interface TopBarProps {
@@ -8,6 +21,7 @@ interface TopBarProps {
   settings: Settings | null;
   budget: BudgetSummary | null;
   activeJobs: JobTask[];
+  tasks?: JobTask[];
   authEnabled?: boolean;
   authUsername?: string | null;
   onSelectProject: (id: string) => void;
@@ -18,12 +32,25 @@ interface TopBarProps {
   onLogout?: () => void;
 }
 
+const KIND_LABELS: Record<string, string> = {
+  video: "视频生成",
+  batch_video: "批量拍片",
+  image: "图片生成",
+  turnaround: "角色三视图",
+  bgm: "AI 配乐",
+  qa: "视频审片",
+  export: "成片导出",
+  book_bible: "小说设定集",
+  episode_breakdown: "分集拆镜",
+};
+
 export const TopBar: React.FC<TopBarProps> = ({
   projects,
   currentProject,
   settings,
   budget,
   activeJobs,
+  tasks = [],
   authEnabled,
   authUsername,
   onSelectProject,
@@ -36,6 +63,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
   const [newRatio, setNewRatio] = useState<"16:9" | "9:16" | "1:1">("16:9");
+  const [tasksOpen, setTasksOpen] = useState(false);
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -125,12 +153,104 @@ export const TopBar: React.FC<TopBarProps> = ({
       </div>
 
       <div className="flex items-center gap-3">
-        {activeJobs.length > 0 && (
-          <div className="flex items-center gap-2 rounded-full border border-indigo-500/40 bg-indigo-500/10 px-3 py-1 text-xs text-indigo-300">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            <span>
-              {activeJobs.length} 个后台任务 · {activeJobs[0].message} ({activeJobs[0].progress}%)
-            </span>
+        {(activeJobs.length > 0 || tasks.length > 0) && (
+          <div className="relative">
+            {(() => {
+              const failedCount = tasks.filter((t) => t.status === "failed").length;
+              const hasFailedLatest = tasks[0]?.status === "failed";
+              return (
+                <button
+                  type="button"
+                  onClick={() => setTasksOpen((v) => !v)}
+                  className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs transition ${
+                    activeJobs.length > 0
+                      ? "border-indigo-500/40 bg-indigo-500/10 text-indigo-300 hover:bg-indigo-500/20"
+                      : hasFailedLatest
+                      ? "border-rose-500/40 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20"
+                      : "border-studio-border bg-studio-bg text-slate-300 hover:border-slate-600"
+                  }`}
+                  title="点击查看后台任务进度与失败日志"
+                >
+                  {activeJobs.length > 0 ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      <span className="max-w-[240px] truncate">
+                        {activeJobs.length} 个任务 · {activeJobs[0].message} ({activeJobs[0].progress}%)
+                      </span>
+                    </>
+                  ) : hasFailedLatest ? (
+                    <>
+                      <AlertTriangle className="h-3.5 w-3.5 text-rose-400" />
+                      <span>任务失败 ({failedCount})</span>
+                    </>
+                  ) : (
+                    <>
+                      <History className="h-3.5 w-3.5 text-slate-400" />
+                      <span>
+                        任务记录 ({tasks.length}
+                        {failedCount > 0 ? ` · ${failedCount}异常` : ""})
+                      </span>
+                    </>
+                  )}
+                  <ChevronDown className="h-3 w-3 opacity-70" />
+                </button>
+              );
+            })()}
+
+            {tasksOpen && (
+              <div className="absolute right-0 top-10 z-50 w-96 max-w-[90vw] rounded-xl border border-studio-border bg-studio-panel p-3 shadow-2xl">
+                <div className="mb-2 flex items-center justify-between border-b border-studio-border pb-2">
+                  <span className="text-xs font-semibold text-white">最近后台任务记录</span>
+                  <button
+                    type="button"
+                    className="text-[11px] text-slate-400 hover:text-white"
+                    onClick={() => setTasksOpen(false)}
+                  >
+                    关闭
+                  </button>
+                </div>
+                <div className="max-h-96 space-y-2 overflow-y-auto pr-1">
+                  {tasks.slice(0, 12).map((t) => (
+                    <div
+                      key={t.id}
+                      className="rounded-lg border border-studio-border/80 bg-studio-bg p-2.5 text-xs"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium text-slate-200">
+                          {KIND_LABELS[t.kind] || t.kind}
+                        </span>
+                        <span
+                          className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                            t.status === "completed"
+                              ? "bg-emerald-500/15 text-emerald-300"
+                              : t.status === "failed"
+                              ? "bg-rose-500/15 text-rose-300"
+                              : "bg-indigo-500/15 text-indigo-300"
+                          }`}
+                        >
+                          {t.status === "completed" && <CheckCircle2 className="h-3 w-3" />}
+                          {t.status === "failed" && <AlertTriangle className="h-3 w-3" />}
+                          {(t.status === "running" || t.status === "queued") && (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          )}
+                          {t.status === "completed"
+                            ? "已完成"
+                            : t.status === "failed"
+                            ? "失败"
+                            : `${t.progress}%`}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-[11px] text-slate-400">{t.message}</p>
+                      {t.error && (
+                        <pre className="mt-1.5 max-h-28 overflow-auto whitespace-pre-wrap break-all rounded border border-rose-500/30 bg-rose-950/50 p-2 font-mono text-[10px] text-rose-200 select-all">
+                          {t.error}
+                        </pre>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
 

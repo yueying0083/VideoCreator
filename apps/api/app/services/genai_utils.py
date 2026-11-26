@@ -33,11 +33,15 @@ def create_genai_client(
     *,
     timeout_seconds: int = 120,
     api_key_override: str | None = None,
+    api_version: str = "v1beta",
 ) -> genai.Client:
     key = require_gemini_key(settings, api_key_override)
     return genai.Client(
         api_key=key,
-        http_options=types.HttpOptions(timeout=int(timeout_seconds) * 1000),
+        http_options=types.HttpOptions(
+            api_version=api_version,
+            timeout=int(timeout_seconds) * 1000,
+        ),
     )
 
 

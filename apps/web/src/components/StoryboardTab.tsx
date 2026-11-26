@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import {
+  AlertTriangle,
   CheckCircle2,
   ClipboardCopy,
   Eye,
@@ -7,6 +8,7 @@ import {
   Image as ImageIcon,
   LayoutGrid,
   Link2,
+  Loader2,
   Plus,
   Repeat,
   Rocket,
@@ -19,11 +21,12 @@ import {
   Wand2,
 } from "lucide-react";
 import { VIDEO_ENGINE_OPTIONS, estimateVideoUsd } from "../types";
-import type { Asset, Shot, StudioDraftInjection, VideoEngine, VideoResolution } from "../types";
+import type { Asset, JobTask, Shot, StudioDraftInjection, VideoEngine, VideoResolution } from "../types";
 
 interface StoryboardTabProps {
   shots: Shot[];
   assets: Asset[];
+  tasks?: JobTask[];
   effectiveMode: "live" | "demo";
   onCreateShot: () => Promise<void>;
   onUpdateShot: (shotId: string, patch: Partial<Shot>) => Promise<void>;
@@ -75,6 +78,7 @@ const VEO_DURATIONS = [4, 6, 8];
 export const StoryboardTab: React.FC<StoryboardTabProps> = ({
   shots,
   assets,
+  tasks = [],
   effectiveMode,
   onCreateShot,
   onUpdateShot,
@@ -357,6 +361,7 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
             const selectedTake =
               shot.takes.find((t) => t.id === shot.selected_take_id) || shot.takes[0] || null;
             const isIterOpen = iteratePanel && iteratePanel.shotId === shot.id && selectedTake?.id === iteratePanel.takeId;
+            const latestShotTask = tasks.find((t) => t.shot_id === shot.id) || null;
 
             return (
               <div
@@ -463,6 +468,34 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
                     </button>
                   </div>
                 </div>
+
+                {/* Inline task progress / last failure for this shot */}
+                {latestShotTask && (latestShotTask.status === "queued" || latestShotTask.status === "running") && (
+                  <div className="mb-3 rounded-lg border border-indigo-500/30 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-200">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="flex items-center gap-1.5">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-400" />
+                        <span>{latestShotTask.message}</span>
+                      </span>
+                      <span className="font-mono text-[11px]">{latestShotTask.progress}%</span>
+                    </div>
+                    <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-slate-800">
+                      <div
+                        className="h-full bg-indigo-500 transition-all duration-300"
+                        style={{ width: `${Math.max(4, latestShotTask.progress)}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+                {latestShotTask && latestShotTask.status === "failed" && (
+                  <div className="mb-3 flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-950/40 px-3 py-2 text-xs text-rose-200">
+                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-400" />
+                    <div className="min-w-0 flex-1 break-all">
+                      <span className="font-medium">上次生成失败：</span>
+                      <span>{latestShotTask.error || latestShotTask.message}</span>
+                    </div>
+                  </div>
+                )}
 
                 {/* Body: Left prompts & assets | Right keyframes & video player */}
                 <div className="grid grid-cols-1 gap-4 xl:grid-cols-12">

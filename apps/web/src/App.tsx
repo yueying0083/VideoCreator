@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertCircle, BookOpen, Film, Layers, Loader2, Scissors, Sparkles } from "lucide-react";
+import { AlertCircle, BookOpen, Film, Layers, Loader2, Scissors, Sparkles, X } from "lucide-react";
 import { api, setUnauthorizedHandler } from "./api";
 import { AccountModal } from "./components/AccountModal";
 import { AssetHub } from "./components/AssetHub";
@@ -59,7 +59,8 @@ export default function App() {
 
   useEffect(() => {
     if (!toast) return;
-    const t = setTimeout(() => setToast(null), 5000);
+    const ms = toast.kind === "error" ? 12000 : 5000;
+    const t = setTimeout(() => setToast(null), ms);
     return () => clearTimeout(t);
   }, [toast]);
 
@@ -290,6 +291,7 @@ export default function App() {
         settings={settings}
         budget={budget}
         activeJobs={activeJobs}
+        tasks={tasks}
         authEnabled={authStatus.auth_enabled}
         authUsername={authStatus.username}
         onSelectProject={(id) => setCurrentProjectId(id)}
@@ -316,14 +318,22 @@ export default function App() {
 
       {toast && (
         <div
-          className={`fixed bottom-4 right-4 z-50 flex max-w-md items-center gap-2 rounded-xl border px-4 py-3 text-xs shadow-xl ${
+          className={`fixed bottom-4 right-4 z-50 flex max-w-lg items-start gap-2 rounded-xl border px-4 py-3 text-xs shadow-xl ${
             toast.kind === "error"
-              ? "border-rose-500/40 bg-rose-950/90 text-rose-200"
+              ? "border-rose-500/40 bg-rose-950/95 text-rose-200"
               : "border-indigo-500/40 bg-studio-panel/95 text-slate-100"
           }`}
         >
-          {toast.kind === "error" && <AlertCircle className="h-4 w-4 shrink-0 text-rose-400" />}
-          <span>{toast.text}</span>
+          {toast.kind === "error" && <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />}
+          <span className="flex-1 break-all">{toast.text}</span>
+          <button
+            type="button"
+            onClick={() => setToast(null)}
+            className="shrink-0 opacity-70 hover:opacity-100"
+            title="关闭提示"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
         </div>
       )}
 
@@ -572,6 +582,7 @@ export default function App() {
                 <StoryboardTab
                   shots={filteredShots}
                   assets={assets}
+                  tasks={tasks}
                   effectiveMode={settings?.effective_mode || "demo"}
                   onCreateShot={() =>
                     wrap(async () => {
