@@ -28,16 +28,13 @@ if ENV_PATH.exists():
     load_dotenv(ENV_PATH, override=False)
 
 
-# Estimated USD unit costs (2026 Google AI pricing references)
+# Estimated USD unit costs (2026 Google AI + OpenAI pricing references)
 COST_RATES = {
     "chat": 0.005,                 # per director agent turn (Gemini 4)
     "enhance": 0.003,              # per Omni prompt enhancement (Gemini 4)
     "qa": 0.01,                    # per video QA review
-    "image": 0.055,                # per Nano Banana 2.1 (1K-2K) generation
+    "image": 0.055,                # per Nano Banana 2.1 / GPT Image generation
     "turnaround": 0.067,           # per 3-view character turnaround sheet
-    "veo_lite_per_sec": 0.05,      # Veo 3.1 Lite
-    "veo_fast_per_sec": 0.12,      # Veo 3.1 Fast
-    "veo_standard_per_sec": 0.40,  # Veo 3.1 Standard
     "omni_flash_per_sec": 0.03,    # Gemini Omni 1.2 Flash estimated video cost/sec
     "music_clip": 0.04,            # Lyria 3 30s clip
     "music_pro": 0.08,             # Lyria 3 Pro full song
@@ -48,28 +45,21 @@ COST_RATES = {
 def estimate_video_cost(engine: str, duration_sec: int, resolution: str = "720p") -> float:
     if engine in ("flow_import", "demo"):
         return 0.0
-    rate_map = {
-        "veo_lite": COST_RATES["veo_lite_per_sec"],
-        "veo_fast": COST_RATES["veo_fast_per_sec"],
-        "veo_standard": COST_RATES["veo_standard_per_sec"],
-        "omni_flash": COST_RATES["omni_flash_per_sec"],
-    }
-    mult = 1.5 if (engine == "omni_flash" and resolution.lower() == "4k") else 1.0
-    return round(rate_map.get(engine, 0.05) * max(1, duration_sec) * mult, 3)
+    mult = 1.5 if resolution.lower() == "4k" else 1.0
+    return round(COST_RATES["omni_flash_per_sec"] * max(1, duration_sec) * mult, 3)
 
 
 class RuntimeSettings(BaseModel):
     app_mode: Literal["auto", "live", "demo"] = "auto"
     gemini_api_key: str = ""
-    vertex_project_id: str = ""
-    vertex_location: str = "us-central1"
-    google_application_credentials: str = ""
+    image_provider: Literal["gemini", "openai_assets", "openai_all"] = "gemini"
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_api_key: str = ""
+    openai_image_model: str = "gpt-image-1"
+    openai_max_concurrent: int = 2
     text_model: str = "gemini-4-hydrogen"
     image_model: str = "gemini-nano-banana-2.1"
     omni_video_model: str = "gemini-omni-1.2-flash"
-    veo_lite_model: str = "veo-3.1-lite-generate-001"
-    veo_fast_model: str = "veo-3.1-fast-generate-001"
-    veo_standard_model: str = "veo-3.1-generate-001"
     music_model: str = "lyria-3.5"
     max_concurrent_jobs: int = 3
     video_request_timeout: int = 900
@@ -81,29 +71,35 @@ class RuntimeSettings(BaseModel):
             return "demo"
         if self.app_mode == "live":
             return "live"
-        return "live" if (self.gemini_api_key.strip() or self.vertex_project_id.strip()) else "demo"
+        return "live" if (self.gemini_api_key.strip() or self.openai_api_key.strip()) else "demo"
 
     @property
     def has_gemini_key(self) -> bool:
         return bool(self.gemini_api_key.strip())
 
     @property
-    def has_vertex_config(self) -> bool:
-        return bool(self.vertex_project_id.strip())
+    def has_openai_key(self) -> bool:
+        return bool(self.openai_api_key.strip())
+
+    def use_openai_for(self, purpose: str) -> bool:
+        if self.image_provider == "openai_all":
+            return True
+        if self.image_provider == "openai_assets" and purpose in ("asset", "turnaround"):
+            return True
+        return False
 
 
 ENV_KEY_MAP = {
     "app_mode": "APP_MODE",
     "gemini_api_key": "GEMINI_API_KEY",
-    "vertex_project_id": "VERTEX_PROJECT_ID",
-    "vertex_location": "VERTEX_LOCATION",
-    "google_application_credentials": "GOOGLE_APPLICATION_CREDENTIALS",
+    "image_provider": "IMAGE_PROVIDER",
+    "openai_base_url": "OPENAI_BASE_URL",
+    "openai_api_key": "OPENAI_API_KEY",
+    "openai_image_model": "OPENAI_IMAGE_MODEL",
+    "openai_max_concurrent": "OPENAI_MAX_CONCURRENT",
     "text_model": "TEXT_MODEL",
     "image_model": "IMAGE_MODEL",
     "omni_video_model": "OMNI_VIDEO_MODEL",
-    "veo_lite_model": "VEO_LITE_MODEL",
-    "veo_fast_model": "VEO_FAST_MODEL",
-    "veo_standard_model": "VEO_STANDARD_MODEL",
     "music_model": "MUSIC_MODEL",
     "max_concurrent_jobs": "MAX_CONCURRENT_JOBS",
     "video_request_timeout": "VIDEO_REQUEST_TIMEOUT",
@@ -146,22 +142,26 @@ def load_settings() -> RuntimeSettings:
     except ValueError:
         req_timeout = 900
 
-    creds_path = _get("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
-    if creds_path:
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
+    try:
+        openai_conc = max(1, min(8, int(_get("OPENAI_MAX_CONCURRENT", "2") or 2)))
+    except ValueError:
+        openai_conc = 2
+
+    img_provider = _get("IMAGE_PROVIDER", "gemini").strip().lower()
+    if img_provider not in ("gemini", "openai_assets", "openai_all"):
+        img_provider = "gemini"
 
     return RuntimeSettings(
         app_mode=app_mode,  # type: ignore[arg-type]
         gemini_api_key=_get("GEMINI_API_KEY", "").strip(),
-        vertex_project_id=_get("VERTEX_PROJECT_ID", "").strip(),
-        vertex_location=_get("VERTEX_LOCATION", "us-central1").strip() or "us-central1",
-        google_application_credentials=creds_path,
+        image_provider=img_provider,  # type: ignore[arg-type]
+        openai_base_url=_get("OPENAI_BASE_URL", "https://api.openai.com/v1").strip() or "https://api.openai.com/v1",
+        openai_api_key=_get("OPENAI_API_KEY", "").strip(),
+        openai_image_model=_get("OPENAI_IMAGE_MODEL", "gpt-image-1").strip() or "gpt-image-1",
+        openai_max_concurrent=openai_conc,
         text_model=_get("TEXT_MODEL", "gemini-4-hydrogen").strip() or "gemini-4-hydrogen",
         image_model=_get("IMAGE_MODEL", "gemini-nano-banana-2.1").strip() or "gemini-nano-banana-2.1",
         omni_video_model=_get("OMNI_VIDEO_MODEL", "gemini-omni-1.2-flash").strip() or "gemini-omni-1.2-flash",
-        veo_lite_model=_get("VEO_LITE_MODEL", "veo-3.1-lite-generate-001").strip() or "veo-3.1-lite-generate-001",
-        veo_fast_model=_get("VEO_FAST_MODEL", "veo-3.1-fast-generate-001").strip() or "veo-3.1-fast-generate-001",
-        veo_standard_model=_get("VEO_STANDARD_MODEL", "veo-3.1-generate-001").strip() or "veo-3.1-generate-001",
         music_model=_get("MUSIC_MODEL", "lyria-3.5").strip() or "lyria-3.5",
         max_concurrent_jobs=max_jobs,
         video_request_timeout=req_timeout,
@@ -174,16 +174,20 @@ def save_settings_updates(updates: dict) -> RuntimeSettings:
     if not ENV_PATH.exists():
         ENV_PATH.write_text("# Video Creator Studio runtime config\n", encoding="utf-8")
 
+    conc_updated = False
     for field_name, value in updates.items():
         if value is None or field_name not in ENV_KEY_MAP:
             continue
         env_key = ENV_KEY_MAP[field_name]
         str_val = str(value).strip()
         # Keep existing secret if caller sent masked sentinel
-        if field_name == "gemini_api_key" and str_val.startswith("••••"):
+        if field_name in ("gemini_api_key", "openai_api_key") and str_val.startswith("••••"):
             continue
         if field_name == "max_concurrent_jobs":
             str_val = str(max(1, min(6, int(value))))
+        elif field_name == "openai_max_concurrent":
+            str_val = str(max(1, min(8, int(value))))
+            conc_updated = True
         elif field_name == "video_request_timeout":
             str_val = str(max(120, min(1800, int(value))))
         set_key(str(ENV_PATH), env_key, str_val, quote_mode="never")
@@ -194,7 +198,15 @@ def save_settings_updates(updates: dict) -> RuntimeSettings:
     except OSError:
         pass
 
-    return load_settings()
+    cfg = load_settings()
+    if conc_updated:
+        try:
+            from app.services.task_runner import notify_openai_concurrency_changed
+
+            notify_openai_concurrency_changed()
+        except Exception:
+            pass
+    return cfg
 
 
 def mask_secret(secret: str) -> str:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import json
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -12,7 +13,64 @@ from app.services.genai_utils import sanitize_error
 
 _cfg = load_settings()
 _worker_pool = ThreadPoolExecutor(max_workers=_cfg.max_concurrent_jobs, thread_name_prefix="vc-worker")
+_image_pool = ThreadPoolExecutor(max_workers=12, thread_name_prefix="vc-img")
 _chain_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="vc-chain")
+
+
+class DynamicConcurrencyLimiter:
+    """Thread-safe FIFO semaphore whose concurrency cap follows runtime settings."""
+
+    def __init__(self, limit_getter: Callable[[], int]) -> None:
+        self._cond = threading.Condition()
+        self._limit_getter = limit_getter
+        self._in_flight = 0
+        self._waiting: list[int] = []
+        self._seq = 0
+
+    def notify_all(self) -> None:
+        with self._cond:
+            self._cond.notify_all()
+
+    @contextmanager
+    def acquire(self, on_wait: Callable[[int, int], None] | None = None):
+        with self._cond:
+            self._seq += 1
+            ticket = self._seq
+            self._waiting.append(ticket)
+            notified_wait = False
+            try:
+                while True:
+                    limit = max(1, int(self._limit_getter()))
+                    is_next = bool(self._waiting) and self._waiting[0] == ticket
+                    if is_next and self._in_flight < limit:
+                        self._waiting.pop(0)
+                        self._in_flight += 1
+                        self._cond.notify_all()
+                        break
+                    pos = self._waiting.index(ticket) + 1
+                    if not notified_wait and on_wait:
+                        notified_wait = True
+                        on_wait(limit, pos)
+                    self._cond.wait(timeout=1.0)
+            except BaseException:
+                if ticket in self._waiting:
+                    self._waiting.remove(ticket)
+                    self._cond.notify_all()
+                raise
+
+        try:
+            yield
+        finally:
+            with self._cond:
+                self._in_flight = max(0, self._in_flight - 1)
+                self._cond.notify_all()
+
+
+openai_image_limiter = DynamicConcurrencyLimiter(lambda: load_settings().openai_max_concurrent)
+
+
+def notify_openai_concurrency_changed() -> None:
+    openai_image_limiter.notify_all()
 
 _event_loop: asyncio.AbstractEventLoop | None = None
 _subscribers: set[asyncio.Queue[str]] = set()
@@ -65,6 +123,7 @@ def _serialize_job_task(j: JobTask) -> dict[str, Any]:
         "id": j.id,
         "project_id": j.project_id,
         "shot_id": j.shot_id,
+        "asset_id": j.asset_id,
         "kind": j.kind,
         "status": j.status,
         "progress": j.progress,
@@ -82,6 +141,7 @@ def create_job_record(
     kind: str,
     message: str = "任务已入队...",
     shot_id: str | None = None,
+    asset_id: str | None = None,
     estimated_cost_usd: float = 0.0,
 ) -> JobTask:
     db = SessionLocal()
@@ -89,6 +149,7 @@ def create_job_record(
         job = JobTask(
             project_id=project_id,
             shot_id=shot_id,
+            asset_id=asset_id,
             kind=kind,
             status="queued",
             progress=5,
@@ -167,6 +228,7 @@ def submit_background_job(
     worker_fn: Callable[[Callable[[int, str], None]], dict[str, Any]],
     *,
     use_chain_pool: bool = False,
+    use_image_pool: bool = False,
 ) -> None:
     """Schedule a blocking media/AI worker in a bounded thread pool and update SQLite JobTask state."""
 
@@ -193,7 +255,7 @@ def submit_background_job(
                 error=sanitize_error(exc),
             )
 
-    pool = _chain_pool if use_chain_pool else _worker_pool
+    pool = _chain_pool if use_chain_pool else (_image_pool if use_image_pool else _worker_pool)
     pool.submit(_run_sync)
 
 

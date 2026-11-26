@@ -37,6 +37,7 @@ def serialize_job(j: JobTask) -> JobTaskOut:
         id=j.id,
         project_id=j.project_id,
         shot_id=j.shot_id,
+        asset_id=j.asset_id,
         kind=j.kind,
         status=j.status,
         progress=j.progress,

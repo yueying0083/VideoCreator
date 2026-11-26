@@ -14,6 +14,7 @@ from typing import Any, Callable, Literal
 
 from google import genai
 from google.genai import errors, types
+import httpx
 
 from app.config import DATA_DIR, RuntimeSettings, load_settings
 
@@ -45,21 +46,6 @@ def create_genai_client(
     )
 
 
-def create_vertex_client(settings: RuntimeSettings | None = None) -> genai.Client:
-    cfg = settings or load_settings()
-    if not cfg.vertex_project_id:
-        raise RuntimeError(
-            "调用 Veo 3.1 正式版需要配置 Vertex AI（VERTEX_PROJECT_ID）。"
-            "请在「设置」中配置 GCP 项目，或将视频引擎切换为 Gemini Omni 1.2 Flash（仅需 GEMINI_API_KEY），"
-            "或点击「复制 Flow 创作包」使用 Google Flow 网页端 25,000 Ultra 积分生成。"
-        )
-    return genai.Client(
-        vertexai=True,
-        project=cfg.vertex_project_id,
-        location=cfg.vertex_location or "us-central1",
-    )
-
-
 def sanitize_error(err: Exception | str | None, active_key: str | None = None) -> str:
     """Redact API keys, tokens, sensitive query params, and internal endpoints from error text."""
     if not err:
@@ -79,11 +65,14 @@ def sanitize_error(err: Exception | str | None, active_key: str | None = None) -
     else:
         err_str = str(err)
 
-    key = (active_key or load_settings().gemini_api_key or "").strip()
-    if key and len(key) >= 8:
-        err_str = err_str.replace(key, "[REDACTED_KEY]")
+    cfg_now = load_settings()
+    for secret in (active_key, cfg_now.gemini_api_key, cfg_now.openai_api_key):
+        s = (secret or "").strip()
+        if s and len(s) >= 8:
+            err_str = err_str.replace(s, "[REDACTED_KEY]")
 
     err_str = re.sub(r"AIza[0-9A-Za-z_\-]{25,}", "[REDACTED_KEY]", err_str)
+    err_str = re.sub(r"sk-[0-9A-Za-z_\-]{20,}", "[REDACTED_KEY]", err_str)
     err_str = re.sub(r"AQ\.[0-9A-Za-z_\-]{20,}", "[REDACTED_KEY]", err_str)
     err_str = re.sub(r"ya29\.[0-9A-Za-z_\-]+", "[REDACTED_TOKEN]", err_str)
     err_str = re.sub(
@@ -135,6 +124,58 @@ def test_gemini_connection(
             return True, f"API Key 有效（已连接 {name}）。", name
         except Exception as inner:
             return False, f"连接测试失败：{sanitize_error(inner or e, active_key=effective_key)}", None
+
+
+def normalize_openai_base_url(base_url: str | None) -> str:
+    raw = (base_url or "").strip().rstrip("/")
+    if not raw:
+        return "https://api.openai.com/v1"
+    parsed = urllib.parse.urlparse(raw)
+    if parsed.path in ("", "/"):
+        return f"{raw}/v1"
+    return raw
+
+
+def test_openai_connection(
+    settings: RuntimeSettings | None = None,
+    *,
+    base_url_override: str | None = None,
+    api_key_override: str | None = None,
+    model_override: str | None = None,
+) -> tuple[bool, str, str | None]:
+    """Validate OpenAI-compatible image endpoint & API key connectivity."""
+    cfg = settings or load_settings()
+    cleaned_key = (api_key_override or "").strip()
+    if cleaned_key.startswith("••••"):
+        cleaned_key = ""
+    effective_key = cleaned_key or cfg.openai_api_key.strip()
+    if not effective_key:
+        return False, "尚未填写 OPENAI_API_KEY。", None
+
+    base_url = normalize_openai_base_url(base_url_override or cfg.openai_base_url)
+    target_model = (model_override or cfg.openai_image_model or "gpt-image-1").strip()
+
+    try:
+        resp = httpx.get(
+            f"{base_url}/models",
+            headers={"Authorization": f"Bearer {effective_key}"},
+            timeout=20.0,
+        )
+        if resp.status_code >= 400:
+            body_preview = sanitize_error(resp.text[:300], active_key=effective_key)
+            return False, f"连接失败（HTTP {resp.status_code}）：{body_preview}", None
+
+        data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+        ids = {str(m.get("id", "")) for m in (data.get("data") or []) if isinstance(m, dict)}
+        if target_model in ids:
+            return True, f"连接成功！接口与模型 {target_model} 均可用。", target_model
+        return (
+            True,
+            f"API Key 与接口可用（已返回 {len(ids)} 个模型；若为中转站隐藏列表，仍可直接使用 {target_model}）。",
+            target_model,
+        )
+    except Exception as e:
+        return False, f"连接测试失败：{sanitize_error(e, active_key=effective_key)}", None
 
 
 def _strip_query(url: str) -> str:

@@ -105,7 +105,7 @@ def test_full_demo_studio_workflow():
 
                 t_vid = client.post(
                     f"/api/projects/{pid}/shots/{s['id']}/video/generate",
-                    json={"engine": "veo_lite", "duration_sec": 2, "with_audio": True},
+                    json={"engine": "omni_flash", "duration_sec": 3, "with_audio": True},
                 ).json()
                 res_vid = _wait_task(client, t_vid["id"])
                 assert res_vid["status"] == "completed", res_vid.get("error")
@@ -203,7 +203,7 @@ def test_novel_import_and_episode_workflow():
             # 4. Generate 1 take in Episode 1 and verify episode-scoped export
             t_vid = client.post(
                 f"/api/projects/{pid}/shots/{ep1_shots[0]['id']}/video/generate",
-                json={"engine": "veo_lite", "duration_sec": 2, "with_audio": True},
+                json={"engine": "omni_flash", "duration_sec": 3, "with_audio": True},
             ).json()
             assert _wait_task(client, t_vid["id"])["status"] == "completed"
 
@@ -954,4 +954,151 @@ def test_auth_system_and_media_protection(tmp_path: Path, monkeypatch: pytest.Mo
         finally:
             db.close()
         reset_rate_limiter()
+
+
+def test_openai_image_provider_concurrency_and_batch_assets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Verify Vertex removal, OpenAI/GPT image generation & edits, concurrency queueing, and batch asset APIs."""
+    import base64
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    from app.services.google_ai import generate_image_openai
+
+    monkeypatch.setenv("OPENAI_MAX_CONCURRENT", "2")
+    sample_img = _make_sample_image(tmp_path / "seed.png", color="yellow")
+    b64_png = base64.b64encode(sample_img.read_bytes()).decode("ascii")
+
+    # 1. Mock OpenAI /images/generations, /images/edits, and concurrent queueing limit
+    recorded_urls: list[str] = []
+    active_lock = threading.Lock()
+    in_flight = 0
+    peak_in_flight = 0
+
+    def fake_httpx_post(url, headers=None, json=None, data=None, files=None, timeout=None):
+        nonlocal in_flight, peak_in_flight
+        with active_lock:
+            in_flight += 1
+            peak_in_flight = max(peak_in_flight, in_flight)
+            recorded_urls.append(str(url))
+        try:
+            time.sleep(0.15)
+            return SimpleNamespace(
+                status_code=200,
+                text="",
+                json=lambda: {"data": [{"b64_json": b64_png}]},
+            )
+        finally:
+            with active_lock:
+                in_flight -= 1
+
+    monkeypatch.setattr("app.services.google_ai.httpx.post", fake_httpx_post)
+
+    openai_cfg = RuntimeSettings(
+        app_mode="live",
+        image_provider="openai_assets",
+        openai_base_url="https://relay.example.com",
+        openai_api_key="sk-testdummy1234567890abcdef",
+        openai_image_model="gpt-image-1",
+        openai_max_concurrent=2,
+    )
+
+    # Single portrait (no ref -> /v1/images/generations)
+    out_p = tmp_path / "portrait.png"
+    _, model_p, is_demo_p = generate_image_openai(
+        prompt="Cyberpunk detective portrait",
+        output_path=out_p,
+        aspect_ratio="1:1",
+        settings=openai_cfg,
+    )
+    assert out_p.exists() and model_p == "gpt-image-1" and not is_demo_p
+    assert recorded_urls[-1] == "https://relay.example.com/v1/images/generations"
+
+    # Turnaround with reference image (-> /v1/images/edits)
+    out_t = tmp_path / "turnaround.png"
+    generate_image_openai(
+        prompt="3-view turnaround",
+        output_path=out_t,
+        aspect_ratio="16:9",
+        reference_image_paths=[sample_img],
+        settings=openai_cfg,
+    )
+    assert out_t.exists()
+    assert recorded_urls[-1] == "https://relay.example.com/v1/images/edits"
+
+    # Concurrency queue test: 4 concurrent requests capped at max_concurrent=2
+    peak_in_flight = 0
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futs = [
+            pool.submit(
+                generate_image_openai,
+                prompt=f"Queued job {i}",
+                output_path=tmp_path / f"q_{i}.png",
+                aspect_ratio="1:1",
+                settings=openai_cfg,
+            )
+            for i in range(4)
+        ]
+        for fut in futs:
+            fut.result()
+    assert peak_in_flight <= 2, f"Expected concurrency <= 2, observed {peak_in_flight}"
+
+    # 2. Settings & batch-generate / regenerate API test (Demo mode)
+    with TestClient(app) as client:
+        st = client.get("/api/settings").json()
+        assert "vertex_project_id" not in st
+        assert "has_vertex_config" not in st
+        assert "image_provider" in st
+        assert "openai_base_url" in st
+        assert "openai_image_model" in st
+        assert "openai_max_concurrent" in st
+
+        proj = client.post("/api/projects", json={"name": "批量生图队列测试", "aspect_ratio": "16:9"}).json()
+        pid = proj["id"]
+        try:
+            a_ids = []
+            for idx in range(3):
+                a = client.post(
+                    f"/api/projects/{pid}/assets",
+                    json={"name": f"角色{idx+1}", "kind": "character", "description": f"角色描述{idx+1}"},
+                ).json()
+                a_ids.append(a["id"])
+
+            # First batch portrait (regenerate=False -> 3 submitted)
+            b1 = client.post(
+                f"/api/projects/{pid}/assets/batch-generate",
+                json={"asset_ids": a_ids, "target": "portrait", "regenerate": False},
+            ).json()
+            assert b1["submitted_count"] == 3 and b1["skipped_count"] == 0
+            for t in b1["tasks"]:
+                assert t["asset_id"] in a_ids
+                assert _wait_task(client, t["id"])["status"] == "completed"
+
+            # Second batch portrait (regenerate=False -> all 3 skipped)
+            b2 = client.post(
+                f"/api/projects/{pid}/assets/batch-generate",
+                json={"asset_ids": a_ids, "target": "portrait", "regenerate": False},
+            ).json()
+            assert b2["submitted_count"] == 0 and b2["skipped_count"] == 3
+
+            # Regenerate portrait (regenerate=True -> all 3 re-submitted)
+            b3 = client.post(
+                f"/api/projects/{pid}/assets/batch-generate",
+                json={"asset_ids": a_ids, "target": "portrait", "regenerate": True},
+            ).json()
+            assert b3["submitted_count"] == 3
+            for t in b3["tasks"]:
+                assert _wait_task(client, t["id"])["status"] == "completed"
+
+            # Batch turnaround for all 3
+            b4 = client.post(
+                f"/api/projects/{pid}/assets/batch-generate",
+                json={"asset_ids": a_ids, "target": "turnaround", "regenerate": False},
+            ).json()
+            assert b4["submitted_count"] == 3
+            for t in b4["tasks"]:
+                assert _wait_task(client, t["id"])["status"] == "completed"
+
+            final_assets = client.get(f"/api/projects/{pid}/assets").json()
+            assert all(a["file_url"] and a["turnaround_url"] for a in final_assets)
+        finally:
+            client.delete(f"/api/projects/{pid}")
 

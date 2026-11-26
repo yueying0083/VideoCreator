@@ -142,7 +142,7 @@ class Take(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     shot_id: Mapped[str] = mapped_column(ForeignKey("shots.id", ondelete="CASCADE"), index=True)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
-    engine: Mapped[str] = mapped_column(String(32), default="veo_lite")
+    engine: Mapped[str] = mapped_column(String(32), default="omni_flash")
     model_id: Mapped[str] = mapped_column(String(120), default="")
     file_path: Mapped[str] = mapped_column(String(500), nullable=False)
     thumbnail_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -181,6 +181,7 @@ class JobTask(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
     project_id: Mapped[str] = mapped_column(String(32), index=True)
     shot_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    asset_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="queued")  # queued | running | completed | failed
     progress: Mapped[int] = mapped_column(Integer, default=0)
@@ -328,6 +329,7 @@ def init_db() -> None:
         _add_column_if_missing(conn, insp, "takes", "mode", "VARCHAR(32) DEFAULT 'generate'")
 
         _add_column_if_missing(conn, insp, "export_records", "crossfade_sec", "FLOAT DEFAULT 0.0")
+        _add_column_if_missing(conn, insp, "job_tasks", "asset_id", "VARCHAR(32)")
 
 
 def get_db():

@@ -1,26 +1,29 @@
 from __future__ import annotations
 
 import base64
+from contextlib import ExitStack
 import hashlib
 import json
 import textwrap
-import time
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable
 
+import httpx
 from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel, Field
 
 from app.config import RuntimeSettings, load_settings
 from app.services.genai_utils import (
     create_genai_client,
-    create_vertex_client,
     detect_mime,
     extract_interaction_media,
+    normalize_openai_base_url,
+    sanitize_error,
     upload_file_to_gemini,
 )
 from app.services.media_renderer import aspect_to_dimensions, generate_demo_music, generate_demo_video
+from app.services.task_runner import openai_image_limiter
 
 
 class VideoQaOutput(BaseModel):
@@ -112,23 +115,147 @@ def render_demo_image(
     return output_path
 
 
+def _map_openai_image_size(aspect_ratio: str, model_id: str) -> str:
+    is_dalle3 = "dall-e-3" in (model_id or "").lower()
+    if aspect_ratio == "16:9":
+        return "1792x1024" if is_dalle3 else "1536x1024"
+    if aspect_ratio == "9:16":
+        return "1024x1792" if is_dalle3 else "1024x1536"
+    return "1024x1024"
+
+
+def generate_image_openai(
+    prompt: str,
+    output_path: Path,
+    aspect_ratio: str = "16:9",
+    reference_image_paths: list[Path] | None = None,
+    on_progress: Callable[[int, str], None] | None = None,
+    settings: RuntimeSettings | None = None,
+) -> tuple[Path, str, bool]:
+    """Generate or edit an image using OpenAI / GPT-Image compatible API with concurrency queuing."""
+    cfg = settings or load_settings()
+    api_key = cfg.openai_api_key.strip()
+    if not api_key:
+        raise RuntimeError(
+            "已选择 GPT / OpenAI 生图引擎，但尚未填写 OPENAI_API_KEY。请在右上角「设置」中填入。"
+        )
+
+    base_url = normalize_openai_base_url(cfg.openai_base_url)
+    model_id = cfg.openai_image_model.strip() or "gpt-image-1"
+    size = _map_openai_image_size(aspect_ratio, model_id)
+    ref_paths = [p for p in (reference_image_paths or []) if p and p.exists()][:6]
+
+    def _on_wait(limit: int, pos: int) -> None:
+        if on_progress:
+            on_progress(15, f"排队等待 GPT 生图并发槽位（并发上限 {limit}，当前排第 {pos} 位）...")
+
+    with openai_image_limiter.acquire(on_wait=_on_wait):
+        if on_progress:
+            on_progress(45, f"正在调用 GPT ({model_id}) 绘制图像...")
+
+        try:
+            headers = {"Authorization": f"Bearer {api_key}"}
+            if ref_paths:
+                with ExitStack() as stack:
+                    if len(ref_paths) == 1:
+                        rp = ref_paths[0]
+                        fh = stack.enter_context(open(rp, "rb"))
+                        files: Any = {"image": (rp.name, fh, detect_mime(rp, "image/png"))}
+                    else:
+                        files = [
+                            ("image[]", (rp.name, stack.enter_context(open(rp, "rb")), detect_mime(rp, "image/png")))
+                            for rp in ref_paths
+                        ]
+                    resp = httpx.post(
+                        f"{base_url}/images/edits",
+                        headers=headers,
+                        data={"model": model_id, "prompt": prompt, "size": size},
+                        files=files,
+                        timeout=180.0,
+                    )
+            else:
+                body: dict[str, Any] = {
+                    "model": model_id,
+                    "prompt": prompt,
+                    "size": size,
+                    "n": 1,
+                }
+                if "dall-e" in model_id.lower():
+                    body["response_format"] = "b64_json"
+                resp = httpx.post(
+                    f"{base_url}/images/generations",
+                    headers=headers,
+                    json=body,
+                    timeout=180.0,
+                )
+
+            if resp.status_code >= 400:
+                raise RuntimeError(
+                    f"GPT 生图接口错误（HTTP {resp.status_code}）：{sanitize_error(resp.text[:400], active_key=api_key)}"
+                )
+
+            payload = resp.json()
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"GPT 生图请求失败：{sanitize_error(exc, active_key=api_key)}")
+
+    items = payload.get("data") or []
+    if not items or not isinstance(items[0], dict):
+        raise RuntimeError(f"模型 {model_id} 未返回图像数据。")
+
+    first = items[0]
+    img_bytes: bytes | None = None
+    if first.get("b64_json"):
+        img_bytes = base64.b64decode(first["b64_json"])
+    elif first.get("url"):
+        dl = httpx.get(str(first["url"]), timeout=120.0)
+        if dl.status_code >= 400:
+            raise RuntimeError(f"下载 GPT 生成图像失败（HTTP {dl.status_code}）")
+        img_bytes = dl.content
+
+    if not img_bytes:
+        raise RuntimeError(f"模型 {model_id} 未返回有效的 b64_json 或图片 URL。")
+
+    if on_progress:
+        on_progress(85, "图像已生成，正在保存到本地...")
+
+    img = Image.open(BytesIO(img_bytes))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(output_path, format="PNG")
+    return output_path, model_id, False
+
+
 def generate_image(
     prompt: str,
     output_path: Path,
     aspect_ratio: str = "16:9",
     reference_image_paths: list[Path] | None = None,
     badge_title: str = "Keyframe",
+    purpose: str = "asset",
+    on_progress: Callable[[int, str], None] | None = None,
     settings: RuntimeSettings | None = None,
 ) -> tuple[Path, str, bool]:
     """
-    Generate an image with Nano Banana 2.1 (gemini-nano-banana-2.1 via Interactions API) or Demo Renderer.
-    Supports up to 14 reference images for character/style fusion.
+    Generate an image via OpenAI GPT Image OR Gemini Nano Banana 2.1, or Demo Renderer.
+    Supports up to 14 reference images for Gemini and multi-image edits for GPT.
     Returns (output_path, model_used, is_demo).
     """
     cfg = settings or load_settings()
     if cfg.effective_mode == "demo":
-        render_demo_image(output_path, badge_title, prompt, aspect_ratio=aspect_ratio, badge="DEMO · NANO BANANA")
+        badge = "DEMO · GPT IMAGE" if cfg.use_openai_for(purpose) else "DEMO · NANO BANANA"
+        render_demo_image(output_path, badge_title, prompt, aspect_ratio=aspect_ratio, badge=badge)
         return output_path, "demo-image", True
+
+    if cfg.use_openai_for(purpose):
+        return generate_image_openai(
+            prompt=prompt,
+            output_path=output_path,
+            aspect_ratio=aspect_ratio,
+            reference_image_paths=reference_image_paths,
+            on_progress=on_progress,
+            settings=cfg,
+        )
 
     client = create_genai_client(cfg, timeout_seconds=120)
     ref_paths = [p for p in (reference_image_paths or []) if p and p.exists()][:14]
@@ -212,128 +339,40 @@ def generate_video(
     settings: RuntimeSettings | None = None,
 ) -> tuple[Path, str, bool, str | None]:
     """
-    Generate video via Gemini Omni 1.2 Flash, Vertex AI Veo 3.1, or Demo FFmpeg renderer.
+    Generate video via Gemini Omni 1.2 Flash or Demo FFmpeg renderer.
     Returns (output_path, model_used, is_demo, interaction_id).
     """
     cfg = settings or load_settings()
+    from app.services.omni_engine import generate_omni_video
 
-    # ---- Engine B: Gemini Omni 1.2 Flash (handles both Live & Demo consistently) ----
-    if engine == "omni_flash":
-        from app.services.omni_engine import generate_omni_video
-
-        def _on_status(_status: str, pct: int, msg: str) -> None:
-            if on_progress:
-                on_progress(pct, msg)
-
-        return generate_omni_video(
-            prompt_en=prompt_en,
-            output_path=output_path,
-            mode=mode,
-            duration_sec=duration_sec,
-            aspect_ratio=aspect_ratio,
-            resolution=resolution,
-            start_frame_path=start_frame_path,
-            end_frame_path=end_frame_path,
-            source_video_path=source_video_path,
-            ref_image_paths=reference_image_paths,
-            ref_video_paths=reference_video_paths,
-            first_frame_asset_id=first_frame_asset_id,
-            last_frame_asset_id=last_frame_asset_id,
-            source_video_asset_id=source_video_asset_id,
-            ref_image_asset_ids=ref_image_asset_ids,
-            ref_video_asset_ids=ref_video_asset_ids,
-            strip_audio=strip_audio or (not with_audio),
-            previous_interaction_id=previous_interaction_id,
-            task_override=task_override,
-            badge_title=badge_title,
-            on_status=_on_status,
-            settings=cfg,
-        )
-
-    if cfg.effective_mode == "demo":
+    def _on_status(_status: str, pct: int, msg: str) -> None:
         if on_progress:
-            on_progress(25, "Demo 模式：准备关键帧...")
-        src_img = start_frame_path
-        if not src_img or not src_img.exists():
-            tmp_img = output_path.with_suffix(".tmp.png")
-            render_demo_image(tmp_img, badge_title, prompt_en, aspect_ratio=aspect_ratio, badge=f"DEMO · {engine.upper()}")
-            src_img = tmp_img
-        if on_progress:
-            on_progress(60, "Demo 模式：本地 FFmpeg 合成动态演示片段...")
-        generate_demo_video(output_path, src_img, duration_sec=duration_sec, aspect_ratio=aspect_ratio, with_audio=with_audio)
-        if src_img != start_frame_path and src_img.exists():
-            src_img.unlink(missing_ok=True)
-        return output_path, f"demo-{engine}", True, None
+            on_progress(pct, msg)
 
-    # ---- Engine A: Vertex AI Veo 3.1 (Lite / Fast / Standard) ----
-    from google.genai import types  # type: ignore
-
-    model_map = {
-        "veo_lite": cfg.veo_lite_model,
-        "veo_fast": cfg.veo_fast_model,
-        "veo_standard": cfg.veo_standard_model,
-    }
-    model_id = model_map.get(engine, cfg.veo_lite_model)
-    client = create_vertex_client(cfg)
-
-    if on_progress:
-        on_progress(15, f"向 Vertex AI 提交 {model_id} 异步任务...")
-
-    config_kwargs: dict[str, Any] = {
-        "aspect_ratio": aspect_ratio,
-        "duration_seconds": duration_sec,
-        "generate_audio": with_audio,
-    }
-
-    if end_frame_path and end_frame_path.exists():
-        config_kwargs["last_frame"] = types.Image.from_file(location=str(end_frame_path))
-
-    refs = []
-    for rp in (reference_image_paths or [])[:3]:
-        if rp and rp.exists():
-            refs.append(
-                types.VideoGenerationReferenceImage(
-                    image=types.Image.from_file(location=str(rp)),
-                    reference_type="asset",
-                )
-            )
-    if refs and not start_frame_path:
-        config_kwargs["reference_images"] = refs
-
-    call_kwargs: dict[str, Any] = {
-        "model": model_id,
-        "prompt": prompt_en,
-        "config": types.GenerateVideosConfig(**config_kwargs),
-    }
-    if start_frame_path and start_frame_path.exists():
-        call_kwargs["image"] = types.Image.from_file(location=str(start_frame_path))
-
-    operation = client.models.generate_videos(**call_kwargs)
-    poll_count = 0
-    while not operation.done:
-        poll_count += 1
-        pct = min(88, 20 + poll_count * 6)
-        if on_progress:
-            on_progress(pct, f"Vertex AI {model_id} 渲染中（第 {poll_count} 次轮询）...")
-        time.sleep(10)
-        operation = client.operations.get(operation)
-
-    if getattr(operation, "error", None):
-        raise RuntimeError(f"Veo 生成失败: {operation.error}")
-
-    generated_videos = getattr(getattr(operation, "response", None), "generated_videos", None) or []
-    if not generated_videos:
-        raise RuntimeError("Veo 任务完成但未返回视频文件（可能触发了安全过滤）。")
-
-    vid_obj = generated_videos[0].video
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    if getattr(vid_obj, "video_bytes", None):
-        output_path.write_bytes(vid_obj.video_bytes)
-    else:
-        downloaded = client.files.download(file=vid_obj)
-        output_path.write_bytes(downloaded)
-
-    return output_path, model_id, False, None
+    return generate_omni_video(
+        prompt_en=prompt_en,
+        output_path=output_path,
+        mode=mode,
+        duration_sec=duration_sec,
+        aspect_ratio=aspect_ratio,
+        resolution=resolution,
+        start_frame_path=start_frame_path,
+        end_frame_path=end_frame_path,
+        source_video_path=source_video_path,
+        ref_image_paths=reference_image_paths,
+        ref_video_paths=reference_video_paths,
+        first_frame_asset_id=first_frame_asset_id,
+        last_frame_asset_id=last_frame_asset_id,
+        source_video_asset_id=source_video_asset_id,
+        ref_image_asset_ids=ref_image_asset_ids,
+        ref_video_asset_ids=ref_video_asset_ids,
+        strip_audio=strip_audio or (not with_audio),
+        previous_interaction_id=previous_interaction_id,
+        task_override=task_override,
+        badge_title=badge_title,
+        on_status=_on_status,
+        settings=cfg,
+    )
 
 
 def generate_music(

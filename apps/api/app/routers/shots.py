@@ -206,7 +206,9 @@ async def generate_shot_keyframe(
     )
 
     def _worker(progress_cb):
-        progress_cb(30, f"调用 Nano Banana 2.1 合成{which_label}...")
+        cfg = load_settings()
+        provider_label = f"GPT ({cfg.openai_image_model})" if cfg.use_openai_for("keyframe") else "Nano Banana 2.1"
+        progress_cb(30, f"调用 {provider_label} 合成{which_label}...")
         rel_path, abs_path = allocate_rel_path(project_id, "frames", "png", prefix=f"shot_{shot_id}_{payload.which}")
         _, model_used, is_demo = generate_image(
             prompt=prompt,
@@ -214,6 +216,8 @@ async def generate_shot_keyframe(
             aspect_ratio=proj.aspect_ratio,
             reference_image_paths=ref_paths,
             badge_title=f"{shot.title} · {which_label}",
+            purpose="keyframe",
+            on_progress=progress_cb,
         )
         session = SessionLocal()
         try:

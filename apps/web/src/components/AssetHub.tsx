@@ -1,23 +1,30 @@
-import React, { useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
   Camera,
+  CheckSquare,
   Film,
   Image as ImageIcon,
   Layers,
+  Loader2,
   Plus,
+  RefreshCw,
   Scissors,
   Send,
   Sparkles,
+  Square,
   Trash2,
   Upload,
   VolumeX,
 } from "lucide-react";
 import { formatBytes, formatDuration } from "../api";
-import type { Asset, Project, StudioDraftInjection } from "../types";
+import type { Asset, JobTask, Project, Settings, StudioDraftInjection } from "../types";
 
 interface AssetHubProps {
   project: Project;
   assets: Asset[];
+  settings?: Settings | null;
+  tasks?: JobTask[];
   onUpdateProject: (patch: Partial<Project>) => Promise<void>;
   onCreateAsset: (payload: { name: string; kind: string; description: string }) => Promise<void>;
   onUploadMediaFiles: (files: FileList) => Promise<void>;
@@ -31,6 +38,11 @@ interface AssetHubProps {
   onExtractFrame: (id: string, position: "first" | "last") => Promise<void>;
   onGenerateImage: (id: string) => Promise<void>;
   onGenerateTurnaround: (id: string) => Promise<void>;
+  onBatchGenerateAssets: (payload: {
+    asset_ids: string[];
+    target: "portrait" | "turnaround" | "both";
+    regenerate: boolean;
+  }) => Promise<void>;
   onSendToStudio: (draft: Omit<StudioDraftInjection, "nonce">) => void;
 }
 
@@ -45,6 +57,8 @@ const KIND_LABELS: Record<string, string> = {
 export const AssetHub: React.FC<AssetHubProps> = ({
   project,
   assets,
+  settings,
+  tasks = [],
   onUpdateProject,
   onCreateAsset,
   onUploadMediaFiles,
@@ -55,16 +69,71 @@ export const AssetHub: React.FC<AssetHubProps> = ({
   onExtractFrame,
   onGenerateImage,
   onGenerateTurnaround,
+  onBatchGenerateAssets,
   onSendToStudio,
 }) => {
   const [name, setName] = useState("");
   const [kind, setKind] = useState<"character" | "scene" | "prop">("character");
   const [desc, setDesc] = useState("");
   const [styleDraft, setStyleDraft] = useState(project.style_prompt);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [batchSubmitting, setBatchSubmitting] = useState(false);
 
-  React.useEffect(() => {
+  useEffect(() => {
     setStyleDraft(project.style_prompt);
   }, [project.id, project.style_prompt]);
+
+  const imageAssets = useMemo(
+    () => assets.filter((a) => a.media_type !== "video" && a.kind !== "video"),
+    [assets]
+  );
+
+  // Prune deleted asset IDs automatically
+  useEffect(() => {
+    const valid = new Set(imageAssets.map((a) => a.id));
+    setSelectedIds((prev) => {
+      const next = new Set(Array.from(prev).filter((id) => valid.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [imageAssets]);
+
+  const missingPortraitIds = useMemo(
+    () => imageAssets.filter((a) => !a.file_url).map((a) => a.id),
+    [imageAssets]
+  );
+  const missingTurnaroundIds = useMemo(
+    () => imageAssets.filter((a) => !a.turnaround_url).map((a) => a.id),
+    [imageAssets]
+  );
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const runBatch = async (target: "portrait" | "turnaround" | "both", regenerate: boolean) => {
+    if (selectedIds.size === 0) return;
+    setBatchSubmitting(true);
+    try {
+      await onBatchGenerateAssets({
+        asset_ids: Array.from(selectedIds),
+        target,
+        regenerate,
+      });
+    } finally {
+      setBatchSubmitting(false);
+    }
+  };
+
+  const useGptForAssets =
+    settings?.image_provider === "openai_assets" || settings?.image_provider === "openai_all";
+  const engineBadge = useGptForAssets
+    ? `GPT (${settings?.openai_image_model || "gpt-image-1"}) · 并发上限 ${settings?.openai_max_concurrent || 2}`
+    : `Gemini (${settings?.image_model || "gemini-nano-banana-2.1"})`;
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -152,6 +221,106 @@ export const AssetHub: React.FC<AssetHubProps> = ({
         </div>
       </form>
 
+      {/* Multi-Select Batch Action Bar */}
+      {imageAssets.length > 0 && (
+        <div className="flex flex-col gap-3 rounded-xl border border-indigo-500/30 bg-indigo-950/20 p-3.5">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-semibold text-indigo-200">
+                批量多选生图（已选 {selectedIds.size} / {imageAssets.length}）
+              </span>
+              <button
+                type="button"
+                className="studio-btn-secondary py-1 text-[11px]"
+                onClick={() => setSelectedIds(new Set(imageAssets.map((a) => a.id)))}
+              >
+                全选 ({imageAssets.length})
+              </button>
+              <button
+                type="button"
+                className="studio-btn-secondary py-1 text-[11px]"
+                onClick={() => setSelectedIds(new Set(missingPortraitIds))}
+              >
+                选未定妆 ({missingPortraitIds.length})
+              </button>
+              <button
+                type="button"
+                className="studio-btn-secondary py-1 text-[11px]"
+                onClick={() => setSelectedIds(new Set(missingTurnaroundIds))}
+              >
+                选缺三视图 ({missingTurnaroundIds.length})
+              </button>
+              {selectedIds.size > 0 && (
+                <button
+                  type="button"
+                  className="studio-btn-ghost py-1 text-[11px] text-slate-400"
+                  onClick={() => setSelectedIds(new Set())}
+                >
+                  清空
+                </button>
+              )}
+            </div>
+
+            <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 font-mono text-[11px] text-emerald-300">
+              当前引擎：{engineBadge}
+            </span>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={selectedIds.size === 0 || batchSubmitting}
+              className="studio-btn-primary py-1.5 text-xs"
+              onClick={() => runBatch("portrait", false)}
+              title="仅对选中的未生成资产执行定妆"
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              一键生成定妆照
+            </button>
+            <button
+              type="button"
+              disabled={selectedIds.size === 0 || batchSubmitting}
+              className="studio-btn-secondary py-1.5 text-xs"
+              onClick={() => runBatch("portrait", true)}
+              title="强制重新生成选中资产的定妆照并覆盖旧图"
+            >
+              <RefreshCw className="h-3.5 w-3.5 text-amber-400" />
+              重新生成定妆照
+            </button>
+            <button
+              type="button"
+              disabled={selectedIds.size === 0 || batchSubmitting}
+              className="studio-btn-primary py-1.5 text-xs"
+              onClick={() => runBatch("turnaround", false)}
+              title="仅对选中的缺失三视图资产生成正/侧/背三视图"
+            >
+              <Layers className="h-3.5 w-3.5" />
+              一键生成三视图
+            </button>
+            <button
+              type="button"
+              disabled={selectedIds.size === 0 || batchSubmitting}
+              className="studio-btn-secondary py-1.5 text-xs"
+              onClick={() => runBatch("turnaround", true)}
+              title="强制重新生成选中资产的三视图"
+            >
+              <RefreshCw className="h-3.5 w-3.5 text-amber-400" />
+              重新生成三视图
+            </button>
+            <button
+              type="button"
+              disabled={selectedIds.size === 0 || batchSubmitting}
+              className="studio-btn-secondary border-indigo-500/40 py-1.5 text-xs text-indigo-200"
+              onClick={() => runBatch("both", false)}
+              title="先生成缺失定妆照，再以定妆照为参考生成三视图"
+            >
+              <Sparkles className="h-3.5 w-3.5 text-indigo-400" />
+              定妆 + 三视图连出
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Asset Grid */}
       {assets.length === 0 ? (
         <div className="rounded-xl border border-dashed border-studio-border p-10 text-center text-sm text-slate-500">
@@ -161,14 +330,38 @@ export const AssetHub: React.FC<AssetHubProps> = ({
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
           {assets.map((asset) => {
             const isVideo = asset.media_type === "video" || asset.kind === "video";
+            const isSelected = selectedIds.has(asset.id);
+            const latestAssetTask = tasks.find((t) => t.asset_id === asset.id) || null;
+            const isRunning =
+              latestAssetTask &&
+              (latestAssetTask.status === "queued" || latestAssetTask.status === "running");
+
             return (
               <div
                 key={asset.id}
-                className="flex flex-col justify-between rounded-xl border border-studio-border bg-studio-card p-4"
+                className={`flex flex-col justify-between rounded-xl border bg-studio-card p-4 transition ${
+                  isSelected
+                    ? "border-indigo-500 ring-1 ring-indigo-500/40"
+                    : "border-studio-border"
+                }`}
               >
                 <div>
                   <div className="mb-3 flex items-center justify-between gap-2">
                     <div className="flex flex-wrap items-center gap-2">
+                      {!isVideo && (
+                        <button
+                          type="button"
+                          onClick={() => toggleSelect(asset.id)}
+                          className="text-slate-400 hover:text-indigo-300"
+                          title={isSelected ? "取消选中" : "选中加入批量操作"}
+                        >
+                          {isSelected ? (
+                            <CheckSquare className="h-4 w-4 text-indigo-400" />
+                          ) : (
+                            <Square className="h-4 w-4" />
+                          )}
+                        </button>
+                      )}
                       <span
                         className={`rounded px-2 py-0.5 text-[11px] font-medium ${
                           isVideo ? "bg-cyan-500/20 text-cyan-300" : "bg-indigo-500/20 text-indigo-300"
@@ -194,6 +387,34 @@ export const AssetHub: React.FC<AssetHubProps> = ({
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
                   </div>
+
+                  {/* Per-asset live queue/progress/error status */}
+                  {isRunning && latestAssetTask && (
+                    <div className="mb-3 rounded-lg border border-indigo-500/30 bg-indigo-950/30 px-3 py-2 text-xs text-indigo-200">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="flex items-center gap-1.5">
+                          <Loader2 className="h-3.5 w-3.5 animate-spin text-indigo-400" />
+                          <span>{latestAssetTask.message}</span>
+                        </span>
+                        <span className="font-mono text-[11px]">{latestAssetTask.progress}%</span>
+                      </div>
+                      <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-slate-800">
+                        <div
+                          className="h-full bg-indigo-500 transition-all duration-300"
+                          style={{ width: `${Math.max(5, latestAssetTask.progress)}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {latestAssetTask && latestAssetTask.status === "failed" && (
+                    <div className="mb-3 flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-950/40 px-3 py-2 text-xs text-rose-200">
+                      <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-rose-400" />
+                      <div className="min-w-0 flex-1 break-all">
+                        <span className="font-medium">上次生图失败：</span>
+                        <span>{latestAssetTask.error || latestAssetTask.message}</span>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Previews */}
                   {isVideo ? (
@@ -260,15 +481,21 @@ export const AssetHub: React.FC<AssetHubProps> = ({
                   {!isVideo && (
                     <>
                       <button className="studio-btn-primary" onClick={() => onGenerateImage(asset.id)}>
-                        <Sparkles className="h-3.5 w-3.5" />
-                        Nano Banana 2.1 定妆 (~$0.06)
+                        {asset.file_url ? (
+                          <RefreshCw className="h-3.5 w-3.5" />
+                        ) : (
+                          <Sparkles className="h-3.5 w-3.5" />
+                        )}
+                        {asset.file_url ? "重新生成定妆" : "生成定妆照"}
                       </button>
-                      {asset.kind === "character" && (
-                        <button className="studio-btn-secondary" onClick={() => onGenerateTurnaround(asset.id)}>
+                      <button className="studio-btn-secondary" onClick={() => onGenerateTurnaround(asset.id)}>
+                        {asset.turnaround_url ? (
+                          <RefreshCw className="h-3.5 w-3.5" />
+                        ) : (
                           <Layers className="h-3.5 w-3.5" />
-                          生成三视图 (~$0.07)
-                        </button>
-                      )}
+                        )}
+                        {asset.turnaround_url ? "重新生成三视图" : "生成三视图"}
+                      </button>
                       {asset.file_url && (
                         <>
                           <button

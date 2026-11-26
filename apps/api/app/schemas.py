@@ -10,16 +10,15 @@ class SettingsOut(BaseModel):
     effective_mode: Literal["live", "demo"]
     has_gemini_key: bool
     gemini_api_key_masked: str
-    has_vertex_config: bool
-    vertex_project_id: str
-    vertex_location: str
-    google_application_credentials: str
+    image_provider: Literal["gemini", "openai_assets", "openai_all"]
+    has_openai_key: bool
+    openai_base_url: str
+    openai_api_key_masked: str
+    openai_image_model: str
+    openai_max_concurrent: int
     text_model: str
     image_model: str
     omni_video_model: str
-    veo_lite_model: str
-    veo_fast_model: str
-    veo_standard_model: str
     music_model: str
     max_concurrent_jobs: int
     video_request_timeout: int
@@ -32,15 +31,14 @@ class SettingsOut(BaseModel):
 class SettingsUpdate(BaseModel):
     app_mode: Literal["auto", "live", "demo"] | None = None
     gemini_api_key: str | None = None
-    vertex_project_id: str | None = None
-    vertex_location: str | None = None
-    google_application_credentials: str | None = None
+    image_provider: Literal["gemini", "openai_assets", "openai_all"] | None = None
+    openai_base_url: str | None = None
+    openai_api_key: str | None = None
+    openai_image_model: str | None = None
+    openai_max_concurrent: int | None = Field(default=None, ge=1, le=8)
     text_model: str | None = None
     image_model: str | None = None
     omni_video_model: str | None = None
-    veo_lite_model: str | None = None
-    veo_fast_model: str | None = None
-    veo_standard_model: str | None = None
     music_model: str | None = None
     max_concurrent_jobs: int | None = Field(default=None, ge=1, le=6)
     video_request_timeout: int | None = Field(default=None, ge=120, le=1800)
@@ -49,6 +47,12 @@ class SettingsUpdate(BaseModel):
 
 class ConnectionTestRequest(BaseModel):
     gemini_api_key: str | None = None
+
+
+class OpenAIConnectionTestRequest(BaseModel):
+    openai_base_url: str | None = None
+    openai_api_key: str | None = None
+    openai_image_model: str | None = None
 
 
 class ConnectionTestResponse(BaseModel):
@@ -152,6 +156,18 @@ class AssetUpdate(BaseModel):
 
 class AssetGenerateRequest(BaseModel):
     prompt_override: str | None = None
+
+
+class BatchGenerateAssetsRequest(BaseModel):
+    asset_ids: list[str] = Field(min_length=1)
+    target: Literal["portrait", "turnaround", "both"] = "portrait"
+    regenerate: bool = False
+
+
+class BatchGenerateAssetsResponse(BaseModel):
+    submitted_count: int
+    skipped_count: int
+    tasks: list["JobTaskOut"] = Field(default_factory=list)
 
 
 class PrepAssetRequest(BaseModel):
@@ -268,7 +284,7 @@ class KeyframeGenerateRequest(BaseModel):
 
 
 class VideoGenerateRequest(BaseModel):
-    engine: Literal["veo_lite", "veo_fast", "veo_standard", "omni_flash"] = "veo_lite"
+    engine: Literal["omni_flash"] = "omni_flash"
     duration_sec: int = Field(default=6, ge=1, le=15)
     resolution: Literal["360p", "720p", "1080p", "4k"] = "720p"
     with_audio: bool = True
@@ -278,7 +294,7 @@ class VideoGenerateRequest(BaseModel):
 
 class BatchGenerateShotsRequest(BaseModel):
     episode_id: str | None = None
-    engine: Literal["veo_lite", "veo_fast", "veo_standard", "omni_flash"] = "omni_flash"
+    engine: Literal["omni_flash"] = "omni_flash"
     resolution: Literal["360p", "720p", "1080p", "4k"] = "720p"
     with_audio: bool = True
     use_end_frame: bool = False
@@ -444,6 +460,7 @@ class JobTaskOut(BaseModel):
     id: str
     project_id: str
     shot_id: str | None = None
+    asset_id: str | None = None
     kind: str
     status: str
     progress: int

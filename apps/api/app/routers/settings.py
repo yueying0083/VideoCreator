@@ -11,10 +11,11 @@ from app.schemas import (
     BudgetSummary,
     ConnectionTestRequest,
     ConnectionTestResponse,
+    OpenAIConnectionTestRequest,
     SettingsOut,
     SettingsUpdate,
 )
-from app.services.genai_utils import test_gemini_connection
+from app.services.genai_utils import test_gemini_connection, test_openai_connection
 from app.services.media_renderer import get_ffmpeg_bin, get_ffprobe_bin
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
@@ -29,16 +30,15 @@ def _to_settings_out() -> SettingsOut:
         effective_mode=cfg.effective_mode,
         has_gemini_key=cfg.has_gemini_key,
         gemini_api_key_masked=mask_secret(cfg.gemini_api_key),
-        has_vertex_config=cfg.has_vertex_config,
-        vertex_project_id=cfg.vertex_project_id,
-        vertex_location=cfg.vertex_location,
-        google_application_credentials=cfg.google_application_credentials,
+        image_provider=cfg.image_provider,
+        has_openai_key=cfg.has_openai_key,
+        openai_base_url=cfg.openai_base_url,
+        openai_api_key_masked=mask_secret(cfg.openai_api_key),
+        openai_image_model=cfg.openai_image_model,
+        openai_max_concurrent=cfg.openai_max_concurrent,
         text_model=cfg.text_model,
         image_model=cfg.image_model,
         omni_video_model=cfg.omni_video_model,
-        veo_lite_model=cfg.veo_lite_model,
-        veo_fast_model=cfg.veo_fast_model,
-        veo_standard_model=cfg.veo_standard_model,
         music_model=cfg.music_model,
         max_concurrent_jobs=cfg.max_concurrent_jobs,
         video_request_timeout=cfg.video_request_timeout,
@@ -66,6 +66,18 @@ def test_connection(payload: ConnectionTestRequest | None = None):
     ok, message, checked_model = test_gemini_connection(
         cfg,
         api_key_override=payload.gemini_api_key if payload else None,
+    )
+    return ConnectionTestResponse(ok=ok, message=message, checked_model=checked_model)
+
+
+@router.post("/test-openai-connection", response_model=ConnectionTestResponse)
+def test_openai_endpoint(payload: OpenAIConnectionTestRequest | None = None):
+    cfg = load_settings()
+    ok, message, checked_model = test_openai_connection(
+        cfg,
+        base_url_override=payload.openai_base_url if payload else None,
+        api_key_override=payload.openai_api_key if payload else None,
+        model_override=payload.openai_image_model if payload else None,
     )
     return ConnectionTestResponse(ok=ok, message=message, checked_model=checked_model)
 

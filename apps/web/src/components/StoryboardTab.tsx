@@ -73,7 +73,6 @@ interface StoryboardTabProps {
 const SHOT_TYPES = ["远景", "全景", "中景", "中近景", "近景", "特写"];
 const CAMERA_MOVES = ["缓慢推进", "缓慢拉远", "横摇", "侧面跟拍", "俯拍航拍", "环绕运镜", "固定机位"];
 const OMNI_DURATIONS = [3, 4, 5, 6, 8, 10, 12, 15];
-const VEO_DURATIONS = [4, 6, 8];
 
 export const StoryboardTab: React.FC<StoryboardTabProps> = ({
   shots,
@@ -185,7 +184,7 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
     }
   };
 
-  const durationChoices = engine === "omni_flash" ? OMNI_DURATIONS : VEO_DURATIONS;
+  const durationChoices = OMNI_DURATIONS;
 
   return (
     <div className="space-y-4 p-5">
@@ -542,7 +541,7 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
                     <div>
                       <div className="mb-1 flex items-center justify-between">
                         <label className="text-[11px] text-slate-400">
-                          电影级英文提示词（用于 Nano Banana 2.1 / Omni 1.2 / Veo 3.1 / Flow）
+                          电影级英文提示词（用于 Gemini Omni 1.2 / 关键帧 / Flow）
                         </label>
                         <button
                           type="button"
@@ -845,7 +844,7 @@ export const StoryboardTab: React.FC<StoryboardTabProps> = ({
                       ) : (
                         <div className="flex h-28 flex-col items-center justify-center gap-1 text-xs text-slate-500">
                           <Film className="h-6 w-6" />
-                          <span>尚无视频 Take（建议先合成首帧，再用 Omni 1.2 / Veo / Flow 生成）</span>
+                          <span>尚无视频 Take（建议先合成首帧，再用 Omni 1.2 或 Flow 生成）</span>
                         </div>
                       )}
 

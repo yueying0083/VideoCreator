@@ -1,5 +1,6 @@
 export type AppMode = "auto" | "live" | "demo";
-export type VideoEngine = "veo_lite" | "veo_fast" | "veo_standard" | "omni_flash";
+export type ImageProvider = "gemini" | "openai_assets" | "openai_all";
+export type VideoEngine = "omni_flash";
 export type VideoResolution = "360p" | "720p" | "1080p" | "4k";
 
 export interface Settings {
@@ -7,16 +8,15 @@ export interface Settings {
   effective_mode: "live" | "demo";
   has_gemini_key: boolean;
   gemini_api_key_masked: string;
-  has_vertex_config: boolean;
-  vertex_project_id: string;
-  vertex_location: string;
-  google_application_credentials: string;
+  image_provider: ImageProvider;
+  has_openai_key: boolean;
+  openai_base_url: string;
+  openai_api_key_masked: string;
+  openai_image_model: string;
+  openai_max_concurrent: number;
   text_model: string;
   image_model: string;
   omni_video_model: string;
-  veo_lite_model: string;
-  veo_fast_model: string;
-  veo_standard_model: string;
   music_model: string;
   max_concurrent_jobs: number;
   video_request_timeout: number;
@@ -172,6 +172,7 @@ export interface JobTask {
   id: string;
   project_id: string;
   shot_id: string | null;
+  asset_id?: string | null;
   kind: string;
   status: "queued" | "running" | "completed" | "failed";
   progress: number;
@@ -272,11 +273,8 @@ export const VIDEO_ENGINE_OPTIONS: Array<{
     label: "Gemini Omni 1.2 Flash",
     ratePerSec: 0.03,
     channel: "Gemini API",
-    desc: "仅需 API Key · 支持3-15s/4K/R2V/改片续写 (~$0.03/s)",
+    desc: "支持 3-15s / 4K / R2V / 改片续写 (~$0.03/s)",
   },
-  { id: "veo_lite", label: "Veo 3.1 Lite", ratePerSec: 0.05, channel: "Vertex AI", desc: "低成本打样首选 (~$0.05/s)" },
-  { id: "veo_fast", label: "Veo 3.1 Fast", ratePerSec: 0.12, channel: "Vertex AI", desc: "质量速度均衡 (~$0.12/s)" },
-  { id: "veo_standard", label: "Veo 3.1 Standard", ratePerSec: 0.4, channel: "Vertex AI", desc: "电影级精渲 (~$0.40/s)" },
 ];
 
 export function estimateVideoUsd(engine: VideoEngine, sec: number, resolution: VideoResolution = "720p"): string {

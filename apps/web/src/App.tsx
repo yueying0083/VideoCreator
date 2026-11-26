@@ -507,6 +507,8 @@ export default function App() {
                 <AssetHub
                   project={currentProject}
                   assets={assets}
+                  settings={settings}
+                  tasks={tasks}
                   onUpdateProject={(patch) =>
                     wrap(async () => {
                       await api.updateProject(currentProject.id, patch);
@@ -572,6 +574,19 @@ export default function App() {
                     wrap(async () => {
                       const job = await api.generateAssetTurnaround(currentProject.id, id);
                       setTasks((prev) => [job, ...prev]);
+                    })
+                  }
+                  onBatchGenerateAssets={(payload) =>
+                    wrap(async () => {
+                      const res = await api.batchGenerateAssets(currentProject.id, payload);
+                      if (res.tasks.length > 0) {
+                        setTasks((prev) => [...res.tasks, ...prev]);
+                      }
+                      showToast(
+                        res.submitted_count > 0
+                          ? `已提交 ${res.submitted_count} 个资产生成任务${res.skipped_count > 0 ? `（跳过 ${res.skipped_count} 个已存在/非图片资产）` : ""}，将按并发上限自动排队执行`
+                          : `没有需要生成的任务（跳过 ${res.skipped_count} 个已存在资产，如需覆盖请点“重新生成”）`
+                      );
                     })
                   }
                   onSendToStudio={handleSendToStudio}

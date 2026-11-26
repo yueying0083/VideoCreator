@@ -79,12 +79,21 @@ export const api = {
 
   // Settings & Budget
   getSettings: () => req<Settings>("/api/settings"),
-  updateSettings: (payload: Partial<Settings> & { gemini_api_key?: string }) =>
+  updateSettings: (payload: Partial<Settings> & { gemini_api_key?: string; openai_api_key?: string }) =>
     req<Settings>("/api/settings", { method: "PUT", body: JSON.stringify(payload) }),
   testConnection: (gemini_api_key?: string) =>
     req<ConnectionTestResult>("/api/settings/test-connection", {
       method: "POST",
       body: JSON.stringify({ gemini_api_key: gemini_api_key || null }),
+    }),
+  testOpenAIConnection: (payload: {
+    openai_base_url?: string;
+    openai_api_key?: string;
+    openai_image_model?: string;
+  }) =>
+    req<ConnectionTestResult>("/api/settings/test-openai-connection", {
+      method: "POST",
+      body: JSON.stringify(payload),
     }),
   getBudget: () => req<BudgetSummary>("/api/settings/budget"),
 
@@ -174,6 +183,14 @@ export const api = {
     }),
   generateAssetTurnaround: (pid: string, aid: string) =>
     req<JobTask>(`/api/projects/${pid}/assets/${aid}/turnaround`, { method: "POST" }),
+  batchGenerateAssets: (
+    pid: string,
+    payload: { asset_ids: string[]; target: "portrait" | "turnaround" | "both"; regenerate: boolean }
+  ) =>
+    req<{ submitted_count: number; skipped_count: number; tasks: JobTask[] }>(
+      `/api/projects/${pid}/assets/batch-generate`,
+      { method: "POST", body: JSON.stringify(payload) }
+    ),
 
   // Shots & Takes
   listShots: (pid: string) => req<Shot[]>(`/api/projects/${pid}/shots`),
